@@ -196,6 +196,12 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
 
   return (
     <section className="canvaspage">
+      <header className="pagehead">
+        <div>
+          <label>SEQUENCE BUILDER</label>
+          <h2>Campaign canvas</h2>
+        </div>
+      </header>
       <div className="canvastools">
         <select value={campaignId} onChange={(e) => setCampaignId(e.target.value)}>
           {campaigns.map((c) => (

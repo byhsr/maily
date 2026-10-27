@@ -18,7 +18,6 @@ import { AgentDrawer } from "../drawers/AgentDrawer";
 import { SettingsDrawer } from "../drawers/SettingsDrawer";
 import { CommandBar } from "../ui/CommandBar";
 import { Rail } from "./Rail";
-import { Topbar } from "./Topbar";
 
 function readFavourites(): string[] {
   try {
@@ -37,7 +36,6 @@ export function Shell() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [note, setNote] = useState("");
-  const [status, setStatus] = useState("All");
   const [query, setQuery] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
@@ -84,9 +82,7 @@ export function Shell() {
   const openLead = () => setDrawer("lead");
 
   const q = query.trim().toLowerCase();
-  const visibleCampaigns = campaigns.filter(
-    (c) => (status === "All" || c.status === status.toLowerCase()) && (!q || c.name.toLowerCase().includes(q))
-  );
+  const visibleCampaigns = campaigns.filter((c) => !q || c.name.toLowerCase().includes(q));
   const visibleLeads = leads.filter(
     (l) => !q || l.email.toLowerCase().includes(q) || (l.first_name || "").toLowerCase().includes(q) || (l.company || "").toLowerCase().includes(q)
   );
@@ -102,7 +98,6 @@ export function Shell() {
         onOpenFavourites={() => setPage("Campaigns")}
       />
       <main className="workspace">
-        <Topbar page={page} status={status} onStatus={setStatus} onNewCampaign={openCampaign} />
         {page === "Home" && <Home campaigns={visibleCampaigns} open={setDrawer} />}
         {page === "Campaigns" && (
           <Campaigns

@@ -150,6 +150,12 @@ export function Inbox({ tell }: InboxProps) {
 
   return (
     <section className="inboxpage">
+      <header className="pagehead">
+        <div>
+          <label>CONVERSATIONS</label>
+          <h2>Inbox</h2>
+        </div>
+      </header>
       <div className="inboxtools">
         <Button variant="ghost" onClick={runSync}>
           <RefreshCw size={15} />Sync replies

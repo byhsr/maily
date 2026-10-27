@@ -1,8 +1,12 @@
+import { useState } from "react";
 import { ChevronRight, Plus, Star } from "lucide-react";
 import type { Campaign } from "../lib/types";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
+import { FilterChip } from "../ui/FilterChip";
+
+const STATUS_FILTERS = ["All", "Active", "Draft", "Paused"];
 
 type CampaignsProps = {
   campaigns: Campaign[];
@@ -13,6 +17,9 @@ type CampaignsProps = {
 };
 
 export function Campaigns({ campaigns, open, favourites, onToggleFavourite, onOpenCanvas }: CampaignsProps) {
+  const [status, setStatus] = useState("All");
+  const shown = campaigns.filter((c) => status === "All" || c.status === status.toLowerCase());
+
   return (
     <section className="sheet">
       <header>
@@ -24,9 +31,14 @@ export function Campaigns({ campaigns, open, favourites, onToggleFavourite, onOp
           <Plus />New campaign
         </Button>
       </header>
-      {campaigns.length ? (
+      <div className="chips">
+        {STATUS_FILTERS.map((s) => (
+          <FilterChip key={s} label={s} active={status === s} onClick={() => setStatus(s)} />
+        ))}
+      </div>
+      {shown.length ? (
         <div className="rows">
-          {campaigns.map((c) => (
+          {shown.map((c) => (
             <div key={c.id}>
               <span className="rowname">
                 <button
@@ -46,6 +58,8 @@ export function Campaigns({ campaigns, open, favourites, onToggleFavourite, onOp
             </div>
           ))}
         </div>
+      ) : campaigns.length ? (
+        <p className="muted">No campaigns are {status.toLowerCase()}.</p>
       ) : (
         <EmptyState text="No campaign sequences yet." action={() => open("campaign")} />
       )}
