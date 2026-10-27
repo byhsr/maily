@@ -1,0 +1,5 @@
+@layer base { body { margin:0; font-family: Inter, ui-sans-serif, system-ui; } button,input,textarea,select { font:inherit; } }
+
+body{background:var(--paper);color:var(--ink)}
+
+small{@apply ml-2 text-xs text-slate-500}
