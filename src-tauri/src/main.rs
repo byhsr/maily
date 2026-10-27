@@ -1510,6 +1510,396 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
     sqlx::query("UPDATE accounts SET sent_today=sent_today+1,health='healthy',last_health_at=?,updated_at=? WHERE id=?").bind(now()).bind(now()).bind(account_id).execute(&st.db).await.map_err(err)?;
     Ok(())
 }
+fn extract_email(value: &str) -> String {
+    let trimmed = value.trim();
+    if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.find('>')) {
+        if end > start + 1 {
+            return trimmed[start + 1..end].trim().to_lowercase();
+        }
+    }
+    trimmed.to_lowercase()
+}
+
+/// Cheap keyword rules run before the model, per the classification pipeline.
+fn rule_category(text: &str) -> Option<&'static str> {
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if has(&["unsubscribe", "opt out", "opt-out", "remove me", "take me off"]) {
+        return Some("unsubscribe");
+    }
+    if has(&["out of office", "automatic reply", "auto-reply", "on leave", "annual leave", "away until"]) {
+        return Some("out_of_office");
+    }
+    if has(&["undeliverable", "delivery status notification", "mail delivery failed", "address not found", "mailbox full", "550 "]) {
+        return Some("bounce");
+    }
+    if has(&["not interested", "no thanks", "no thank you", "pass on this"]) {
+        return Some("not_interested");
+    }
+    if has(&["not now", "reach out later", "next quarter", "circle back", "in a few months"]) {
+        return Some("not_now");
+    }
+    if has(&["wrong person", "not the right person", "speak to", "reach out to", "forwarded your"]) {
+        return Some("referral");
+    }
+    if has(&["interested", "let's chat", "happy to talk", "book a call", "send me more", "sounds good"]) {
+        return Some("interested");
+    }
+    None
+}
+
+fn channel_for(category: &str) -> &'static str {
+    match category {
+        "interested" => "ch-interested",
+        "question" => "ch-question",
+        "not_now" => "ch-not-now",
+        "not_interested" => "ch-not-interested",
+        "referral" => "ch-referral",
+        "out_of_office" => "ch-ooo",
+        "unsubscribe" => "ch-unsubscribe",
+        "bounce" => "ch-bounce",
+        _ => "ch-review",
+    }
+}
+
+async fn set_category(db: &SqlitePool, message_id: &str, category: &str, confidence: f64, by: &str) -> Result<()> {
+    let intent = if category == "interested" { Some("interested") } else { None };
+    sqlx::query("UPDATE inbox_messages SET category=?,confidence=?,classified_by=?,channel_id=?,intent=?,read_flag=0 WHERE id=?")
+        .bind(category)
+        .bind(confidence)
+        .bind(by)
+        .bind(channel_for(category))
+        .bind(intent)
+        .bind(message_id)
+        .execute(db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+/// A reply at any point must stop this lead's pending work before any further send.
+async fn stop_lead_sequence(db: &SqlitePool, email: &str) -> Result<()> {
+    let lead: Option<String> = sqlx::query_scalar("SELECT id FROM leads WHERE email=?")
+        .bind(email)
+        .fetch_optional(db)
+        .await
+        .map_err(err)?;
+    if let Some(lead_id) = lead {
+        sqlx::query("UPDATE jobs SET state='cancelled',updated_at=? WHERE state='queued' AND idempotency_key LIKE ?")
+            .bind(now())
+            .bind(format!("%:{}:%", lead_id))
+            .execute(db)
+            .await
+            .map_err(err)?;
+        sqlx::query("UPDATE campaign_leads SET state='paused' WHERE lead_id=? AND state='active'")
+            .bind(&lead_id)
+            .execute(db)
+            .await
+            .map_err(err)?;
+        log(db, "info", "sequence_stopped", &lead_id).await;
+    }
+    Ok(())
+}
+
+async fn store_message(db: &SqlitePool, account_id: &str, provider_message_id: &str, from: &str, subject: &str, received_at: &str, excerpt: &str) -> Result<usize> {
+    let email = extract_email(from);
+    let inserted = sqlx::query("INSERT OR IGNORE INTO inbox_messages(id,account_id,provider_message_id,from_email,subject,received_at,raw_excerpt,read_flag) VALUES(?,?,?,?,?,?,?,0)")
+        .bind(id())
+        .bind(account_id)
+        .bind(provider_message_id)
+        .bind(&email)
+        .bind(subject)
+        .bind(received_at)
+        .bind(excerpt)
+        .execute(db)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if inserted > 0 {
+        stop_lead_sequence(db, &email).await?;
+    }
+    Ok(inserted as usize)
+}
+
+#[tauri::command]
+async fn sync_inbox(state: State<'_, AppState>, account_id: Option<String>) -> Result<usize> {
+    let accounts = sqlx::query("SELECT id,provider FROM accounts")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let mut total = 0usize;
+    for account in accounts {
+        let id: String = account.get("id");
+        if let Some(wanted) = &account_id {
+            if wanted != &id {
+                continue;
+            }
+        }
+        let access = match vault(&format!("oauth:{}", id)).and_then(|entry| entry.get_password().map_err(err)) {
+            Ok(token) => serde_json::from_str::<Value>(&token).ok().and_then(|v| v["access_token"].as_str().map(str::to_string)),
+            Err(_) => None,
+        };
+        let Some(access) = access else { continue };
+        let provider: String = account.get("provider");
+        if provider == "gmail" {
+            let list: Value = state
+                .http
+                .get("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=newer_than:7d&maxResults=25")
+                .bearer_auth(&access)
+                .send()
+                .await
+                .map_err(err)?
+                .error_for_status()
+                .map_err(err)?
+                .json()
+                .await
+                .map_err(err)?;
+            for reference in list["messages"].as_array().cloned().unwrap_or_default() {
+                let mid = reference["id"].as_str().unwrap_or_default();
+                if mid.is_empty() {
+                    continue;
+                }
+                let detail: Value = state
+                    .http
+                    .get(format!("https://gmail.googleapis.com/gmail/v1/users/me/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject", mid))
+                    .bearer_auth(&access)
+                    .send()
+                    .await
+                    .map_err(err)?
+                    .json()
+                    .await
+                    .map_err(err)?;
+                let headers = detail["payload"]["headers"].as_array().cloned().unwrap_or_default();
+                let header = |name: &str| {
+                    headers
+                        .iter()
+                        .find(|h| h["name"].as_str().unwrap_or("").eq_ignore_ascii_case(name))
+                        .and_then(|h| h["value"].as_str())
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let received = detail["internalDate"].as_str().unwrap_or_default().parse::<i64>().unwrap_or(0);
+                let received_at = chrono::DateTime::from_timestamp_millis(received)
+                    .map(|d| d.to_rfc3339())
+                    .unwrap_or_else(now);
+                total += store_message(&state.db, &id, mid, &header("From"), &header("Subject"), &received_at, detail["snippet"].as_str().unwrap_or("")).await?;
+            }
+        } else {
+            let list: Value = state
+                .http
+                .get("https://graph.microsoft.com/v1.0/me/messages?$top=25&$select=id,subject,from,receivedDateTime,bodyPreview")
+                .bearer_auth(&access)
+                .send()
+                .await
+                .map_err(err)?
+                .error_for_status()
+                .map_err(err)?
+                .json()
+                .await
+                .map_err(err)?;
+            for message in list["value"].as_array().cloned().unwrap_or_default() {
+                let mid = message["id"].as_str().unwrap_or_default();
+                if mid.is_empty() {
+                    continue;
+                }
+                let from = message["from"]["emailAddress"]["address"].as_str().unwrap_or("");
+                let received_at = message["receivedDateTime"].as_str().unwrap_or("").to_string();
+                total += store_message(
+                    &state.db,
+                    &id,
+                    mid,
+                    from,
+                    message["subject"].as_str().unwrap_or(""),
+                    &received_at,
+                    message["bodyPreview"].as_str().unwrap_or(""),
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// Classify unmatched replies: cheap rules first, then the local model when asked.
+#[tauri::command]
+async fn classify_inbox(state: State<'_, AppState>, use_agent: Option<bool>) -> Result<usize> {
+    let rows = sqlx::query("SELECT id,subject,raw_excerpt FROM inbox_messages WHERE classified_by IS NULL OR classified_by='rule' ORDER BY received_at DESC LIMIT 50")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let mut classified = 0usize;
+    for row in rows {
+        let message_id: String = row.get("id");
+        let subject = row.get::<Option<String>, _>("subject").unwrap_or_default();
+        let excerpt = row.get::<Option<String>, _>("raw_excerpt").unwrap_or_default();
+        let text = format!("{} {}", subject, excerpt).to_lowercase();
+        if let Some(category) = rule_category(&text) {
+            set_category(&state.db, &message_id, category, 0.9, "rule").await?;
+            classified += 1;
+            continue;
+        }
+        if use_agent.unwrap_or(false) {
+            if let Some((category, confidence)) = classify_with_model(&state, &format!("{} {}", subject, excerpt)).await {
+                if confidence >= 0.7 {
+                    set_category(&state.db, &message_id, &category, confidence, "agent").await?;
+                    classified += 1;
+                    continue;
+                }
+            }
+        }
+        set_category(&state.db, &message_id, "needs_review", 0.0, "rule").await?;
+        classified += 1;
+    }
+    Ok(classified)
+}
+
+async fn classify_with_model(st: &AppState, text: &str) -> Option<(String, f64)> {
+    let prompt = format!(
+        "Classify this cold-email reply into exactly one of: interested, question, not_now, not_interested, referral, out_of_office, unsubscribe, bounce. Return strict JSON {{\"category\":\"...\",\"confidence\":0.0}}. Reply: {}",
+        text
+    );
+    let body: Value = st
+        .http
+        .post("http://127.0.0.1:11434/api/generate")
+        .json(&json!({"model":"llama3.2","prompt":prompt,"stream":false,"format":"json"}))
+        .timeout(std::time::Duration::from_secs(45))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let parsed: Value = serde_json::from_str(body["response"].as_str()?).ok()?;
+    let category = parsed["category"].as_str()?.to_string();
+    let allowed = ["interested", "question", "not_now", "not_interested", "referral", "out_of_office", "unsubscribe", "bounce"];
+    if !allowed.contains(&category.as_str()) {
+        return None;
+    }
+    Some((category, parsed["confidence"].as_f64().unwrap_or(0.0)))
+}
+
+#[tauri::command]
+async fn list_channels(state: State<'_, AppState>) -> Result<Vec<Value>> {
+    sqlx::query("SELECT c.id,c.name,c.color,c.sort,(SELECT count(*) FROM inbox_messages m WHERE m.channel_id=c.id AND m.read_flag=0) AS unread,(SELECT count(*) FROM inbox_messages m WHERE m.channel_id=c.id) AS total FROM channels c ORDER BY c.sort")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)
+        .map(|rows| {
+            rows.iter()
+                .map(|r| json!({"id":r.get::<String,_>("id"),"name":r.get::<String,_>("name"),"color":r.get::<String,_>("color"),"unread":r.get::<i64,_>("unread"),"total":r.get::<i64,_>("total")}))
+                .collect()
+        })
+}
+
+#[tauri::command]
+async fn list_inbox(state: State<'_, AppState>, channel_id: Option<String>, unread_only: Option<bool>) -> Result<Vec<Value>> {
+    let mut sql = String::from(
+        "SELECT m.id,m.account_id,m.from_email,m.subject,m.received_at,m.raw_excerpt,m.category,m.confidence,m.classified_by,m.channel_id,m.read_flag,m.snoozed_until,l.first_name,l.company,l.title FROM inbox_messages m LEFT JOIN leads l ON l.email=m.from_email WHERE 1=1",
+    );
+    if channel_id.is_some() {
+        sql.push_str(" AND m.channel_id=?");
+    }
+    if unread_only.unwrap_or(false) {
+        sql.push_str(" AND m.read_flag=0");
+    }
+    sql.push_str(" ORDER BY m.received_at DESC LIMIT 100");
+    let mut query = sqlx::query(&sql);
+    if let Some(channel) = &channel_id {
+        query = query.bind(channel);
+    }
+    let rows = query.fetch_all(&state.db).await.map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String,_>("id"),
+                "account_id": r.get::<String,_>("account_id"),
+                "from_email": r.get::<Option<String>,_>("from_email"),
+                "subject": r.get::<Option<String>,_>("subject"),
+                "received_at": r.get::<Option<String>,_>("received_at"),
+                "raw_excerpt": r.get::<Option<String>,_>("raw_excerpt"),
+                "category": r.get::<Option<String>,_>("category"),
+                "confidence": r.get::<Option<f64>,_>("confidence"),
+                "classified_by": r.get::<Option<String>,_>("classified_by"),
+                "channel_id": r.get::<Option<String>,_>("channel_id"),
+                "read": r.get::<i64,_>("read_flag") != 0,
+                "snoozed_until": r.get::<Option<String>,_>("snoozed_until"),
+                "lead_name": r.get::<Option<String>,_>("first_name"),
+                "company": r.get::<Option<String>,_>("company"),
+                "title": r.get::<Option<String>,_>("title"),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn set_inbox_channel(state: State<'_, AppState>, message_id: String, channel_id: String) -> Result<()> {
+    // A human correction always wins over rule/agent classification.
+    sqlx::query("UPDATE inbox_messages SET channel_id=?,classified_by='user' WHERE id=?")
+        .bind(channel_id)
+        .bind(message_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn mark_inbox_read(state: State<'_, AppState>, message_id: String, read: bool) -> Result<()> {
+    sqlx::query("UPDATE inbox_messages SET read_flag=? WHERE id=?")
+        .bind(if read { 1 } else { 0 })
+        .bind(message_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn snooze_inbox(state: State<'_, AppState>, message_id: String, until: String) -> Result<()> {
+    sqlx::query("UPDATE inbox_messages SET snoozed_until=?,read_flag=1 WHERE id=?")
+        .bind(until)
+        .bind(message_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn inbox_thread(state: State<'_, AppState>, message_id: String) -> Result<Value> {
+    let message = sqlx::query("SELECT m.id,m.from_email,m.subject,m.received_at,m.raw_excerpt,m.category,m.confidence,m.classified_by,m.channel_id,m.read_flag,l.id AS lead_id,l.first_name,l.company,l.title FROM inbox_messages m LEFT JOIN leads l ON l.email=m.from_email WHERE m.id=?")
+        .bind(&message_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?
+        .ok_or("Message not found")?;
+    let email: Option<String> = message.get("from_email");
+    let sent = match &email {
+        Some(address) => sqlx::query("SELECT s.status,s.created_at,c.name FROM send_logs s LEFT JOIN campaigns c ON c.id=s.campaign_id JOIN leads l ON l.id=s.lead_id WHERE l.email=? ORDER BY s.created_at DESC LIMIT 5")
+            .bind(address)
+            .fetch_all(&state.db)
+            .await
+            .map_err(err)?,
+        None => Vec::new(),
+    };
+    Ok(json!({
+        "id": message.get::<String,_>("id"),
+        "from_email": email,
+        "subject": message.get::<Option<String>,_>("subject"),
+        "received_at": message.get::<Option<String>,_>("received_at"),
+        "raw_excerpt": message.get::<Option<String>,_>("raw_excerpt"),
+        "category": message.get::<Option<String>,_>("category"),
+        "confidence": message.get::<Option<f64>,_>("confidence"),
+        "classified_by": message.get::<Option<String>,_>("classified_by"),
+        "channel_id": message.get::<Option<String>,_>("channel_id"),
+        "read": message.get::<i64,_>("read_flag") != 0,
+        "lead": {"id": message.get::<Option<String>,_>("lead_id"), "name": message.get::<Option<String>,_>("first_name"), "company": message.get::<Option<String>,_>("company"), "title": message.get::<Option<String>,_>("title")},
+        "history": sent.iter().map(|r| json!({"status":r.get::<String,_>("status"),"created_at":r.get::<String,_>("created_at"),"campaign":r.get::<Option<String>,_>("name")})).collect::<Vec<_>>()
+    }))
+}
+
 async fn log(db: &SqlitePool, level: &str, event: &str, detail: &str) {
     let _ =
         sqlx::query("INSERT INTO events(id,level,event_type,detail,created_at) VALUES(?,?,?,?,?)")
@@ -1591,7 +1981,15 @@ fn main() {
             validate_campaign_graph,
             preview_path,
             launch_campaign,
-            pause_campaign
+            pause_campaign,
+            sync_inbox,
+            classify_inbox,
+            list_channels,
+            list_inbox,
+            set_inbox_channel,
+            mark_inbox_read,
+            snooze_inbox,
+            inbox_thread
         ])
         .run(tauri::generate_context!())
         .expect("tauri error");

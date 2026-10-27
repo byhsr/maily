@@ -6,6 +6,7 @@ import type { Campaign, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
 import { Leads } from "../pages/Leads";
+import { Inbox } from "../pages/Inbox";
 import { Templates } from "../pages/Templates";
 import { Agents } from "../pages/Agents";
 import { CampaignCanvas } from "../canvas/Canvas";
@@ -116,6 +117,7 @@ export function Shell() {
           />
         )}
         {page === "Leads" && <Leads leads={visibleLeads} open={setDrawer} reload={load} tell={tell} />}
+        {page === "Inbox" && <Inbox tell={tell} />}
         {page === "Templates" && (
           <Templates
             templates={templates}

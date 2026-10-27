@@ -2,11 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Campaign,
   CampaignGraph,
+  Channel,
   DashboardData,
   DashboardStats,
   GraphEdge,
   GraphNode,
   GraphValidation,
+  InboxMessage,
+  InboxThread,
   Lead,
   PathStep,
   Template,
@@ -40,3 +43,15 @@ export const validateCampaignGraph = (campaignId: string) => api<GraphValidation
 export const launchCampaign = (campaignId: string) => api<number>("launch_campaign", { campaignId });
 export const pauseCampaign = (campaignId: string) => api<void>("pause_campaign", { campaignId });
 export const previewPath = (campaignId: string, leadId: string) => api<PathStep[]>("preview_path", { campaignId, leadId });
+
+export const syncInbox = (accountId?: string) => api<number>("sync_inbox", { accountId: accountId ?? null });
+export const classifyInbox = (useAgent: boolean) => api<number>("classify_inbox", { useAgent });
+export const listChannels = () => api<Channel[]>("list_channels");
+export const listInbox = (channelId?: string, unreadOnly = false) =>
+  api<InboxMessage[]>("list_inbox", { channelId: channelId ?? null, unreadOnly });
+export const setInboxChannel = (messageId: string, channelId: string) =>
+  api<void>("set_inbox_channel", { messageId, channelId });
+export const markInboxRead = (messageId: string, read: boolean) => api<void>("mark_inbox_read", { messageId, read });
+export const snoozeInbox = (messageId: string, until: string) => api<void>("snooze_inbox", { messageId, until });
+export const inboxThread = (messageId: string) => api<InboxThread>("inbox_thread", { messageId });
+export const suppressLead = (email: string, reason: string) => api<void>("suppress_lead", { email, reason });

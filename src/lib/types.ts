@@ -96,3 +96,44 @@ export type PathStep = {
   type: NodeType;
   detail: string;
 };
+
+export type Channel = {
+  id: string;
+  name: string;
+  color: string;
+  unread: number;
+  total: number;
+};
+
+export type InboxMessage = {
+  id: string;
+  account_id: string;
+  from_email?: string;
+  subject?: string;
+  received_at?: string;
+  raw_excerpt?: string;
+  category?: string;
+  confidence?: number;
+  classified_by?: string;
+  channel_id?: string;
+  read: boolean;
+  snoozed_until?: string;
+  lead_name?: string;
+  company?: string;
+  title?: string;
+};
+
+export type InboxThread = {
+  id: string;
+  from_email?: string;
+  subject?: string;
+  received_at?: string;
+  raw_excerpt?: string;
+  category?: string;
+  confidence?: number;
+  classified_by?: string;
+  channel_id?: string;
+  read: boolean;
+  lead: { id?: string; name?: string; company?: string; title?: string };
+  history: { status: string; created_at: string; campaign?: string }[];
+};

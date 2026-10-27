@@ -1236,6 +1236,220 @@ hr {
   }
 }
 
+/* ---------- Inbox ---------- */
+.inboxpage {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.inboxtools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.inboxtools select {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.unreadtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.inboxwrap {
+  display: grid;
+  grid-template-columns: 210px 1fr 320px;
+  gap: 12px;
+  align-items: start;
+}
+
+.channellist,
+.messagelist,
+.threadview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 60vh;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+}
+
+.messagelist {
+  gap: 2px;
+}
+
+.channel {
+  justify-content: space-between;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.channel span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.channel em {
+  width: 14px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.channel i {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-style: normal;
+  font-size: 11px;
+}
+
+.channel:hover {
+  background: var(--surface-2);
+}
+
+.channel.on {
+  background: var(--tint-blue);
+  color: var(--ink);
+}
+
+.channel.tint-mint.on {
+  background: var(--tint-mint);
+}
+
+.channel.tint-peach.on {
+  background: var(--tint-peach);
+}
+
+.channel.tint-lilac.on {
+  background: var(--tint-lilac);
+}
+
+.messagerow {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 6px;
+  border-radius: 10px;
+}
+
+.messagerow.on {
+  background: var(--surface-2);
+}
+
+.messagebody {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: stretch;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  text-align: left;
+}
+
+.messagebody b {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.messagebody small {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.msgmeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.catbadge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-style: normal;
+  text-transform: capitalize;
+}
+
+.unreaddot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.threadview {
+  gap: 10px;
+}
+
+.leadcard,
+.threadmessage,
+.threadhistory {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+}
+
+.threadmessage p {
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.threadhistory div {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.threadactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 1100px) {
+  .inboxwrap {
+    grid-template-columns: 1fr;
+  }
+
+  .channellist,
+  .messagelist,
+  .threadview {
+    min-height: auto;
+  }
+}
+
 @media (max-width: 700px) {
   .actions {
     flex-wrap: wrap;

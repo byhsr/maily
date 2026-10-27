@@ -1,9 +1,10 @@
-import { Bot, CircleUserRound, FileText, Mail, Send, Settings2, Sparkles, Star, Users } from "lucide-react";
+import { Bot, CircleUserRound, FileText, Inbox as InboxIcon, Mail, Send, Settings2, Sparkles, Star, Users } from "lucide-react";
 import type { Campaign } from "../lib/types";
 
 const NAV = [
   ["Home", Sparkles],
   ["Campaigns", Send],
+  ["Inbox", InboxIcon],
   ["Leads", Users],
   ["Templates", FileText],
   ["Agents", Bot],
