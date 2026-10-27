@@ -1,0 +1,9 @@
+node_modules
+dist
+.commandcode
+src-tauri/target
+src-tauri/target-launch
+src-tauri/gen/schemas
+*.log
+.DS_Store
+*.local
