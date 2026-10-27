@@ -38,6 +38,7 @@ export function Shell() {
   const [status, setStatus] = useState("All");
   const [query, setQuery] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
+  const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
 
   const tell = (message: string) => {
     setNote(message);
@@ -72,7 +73,10 @@ export function Shell() {
     });
   };
 
-  const closeDrawer = () => setDrawer(undefined);
+  const closeDrawer = () => {
+    setDrawer(undefined);
+    setEditingTemplate(undefined);
+  };
   const openCampaign = () => setDrawer("campaign");
   const openLead = () => setDrawer("lead");
 
@@ -106,7 +110,18 @@ export function Shell() {
           />
         )}
         {page === "Leads" && <Leads leads={visibleLeads} open={setDrawer} reload={load} tell={tell} />}
-        {page === "Templates" && <Templates templates={templates} open={setDrawer} />}
+        {page === "Templates" && (
+          <Templates
+            templates={templates}
+            open={setDrawer}
+            onEdit={(t) => {
+              setEditingTemplate(t);
+              setDrawer("template");
+            }}
+            reload={load}
+            tell={tell}
+          />
+        )}
         {page === "Agents" && <Agents open={setDrawer} />}
       </main>
       <CommandBar value={query} onChange={setQuery} onNewCampaign={openCampaign} onAddLead={openLead} />
@@ -114,7 +129,9 @@ export function Shell() {
         {drawer && (
           <Drawer kind={drawer} close={closeDrawer}>
             {drawer === "campaign" && <CampaignDrawer templates={templates} close={closeDrawer} reload={load} tell={tell} />}
-            {drawer === "template" && <TemplateDrawer close={closeDrawer} reload={load} tell={tell} />}
+            {drawer === "template" && (
+              <TemplateDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} template={editingTemplate} />
+            )}
             {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
             {drawer === "agent" && <AgentDrawer tell={tell} />}
             {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} />}

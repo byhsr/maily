@@ -709,6 +709,98 @@ button svg {
   background: var(--surface-2);
 }
 
+.drawerwide .templatefull {
+  max-width: none;
+  margin: 26px 0 0;
+}
+
+.tsplit {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 22px;
+  align-items: start;
+}
+
+.teditor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.varchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.varchips .chip {
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+
+.tpreview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface-2);
+}
+
+.tpreviewhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tpreviewhead select {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.tpreview h4 {
+  font-size: 15px;
+}
+
+.tpreview pre {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.checklist .ok {
+  color: var(--ok);
+}
+
+.checklist .bad {
+  color: var(--bad);
+}
+
+@media (max-width: 900px) {
+  .tsplit {
+    grid-template-columns: 1fr;
+  }
+}
+
 .themes {
   display: grid;
   grid-template-columns: 1fr 1fr;

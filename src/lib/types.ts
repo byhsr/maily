@@ -21,6 +21,8 @@ export type Template = {
   name: string;
   subject: string;
   body: string;
+  purpose: string;
+  variants: unknown[];
 };
 
 export type DashboardData = {

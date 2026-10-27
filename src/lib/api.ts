@@ -9,6 +9,7 @@ export const dashboardStats = (range: string) => api<DashboardStats>("dashboard_
 export const listCampaigns = () => api<Campaign[]>("list_campaigns");
 export const listLeads = () => api<Lead[]>("list_leads");
 export const listTemplates = () => api<Template[]>("list_templates");
+export const seedTemplates = () => api<number>("seed_templates");
 export const upsertLeads = (leads: Record<string, unknown>[]) =>
   api<number>("upsert_leads", { leads });
 export const saveCampaign = (input: Record<string, unknown>) =>

@@ -53,6 +53,8 @@ struct TemplateInput {
     name: String,
     subject: String,
     body: String,
+    purpose: Option<String>,
+    variants: Option<Value>,
 }
 #[derive(Deserialize)]
 struct KnowledgeInput {
@@ -304,13 +306,20 @@ async fn save_template(state: State<'_, AppState>, input: TemplateInput) -> Resu
     }
     let x = id();
     let t = now();
+    let purpose = input
+        .purpose
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "first_touch".to_string());
+    let variants = input.variants.filter(|value| value.is_array()).unwrap_or_else(|| json!([]));
     sqlx::query(
-        "INSERT INTO templates(id,name,subject,body,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO templates(id,name,subject,body,purpose,variants,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
     )
     .bind(&x)
     .bind(input.name)
     .bind(input.subject)
     .bind(input.body)
+    .bind(purpose)
+    .bind(variants.to_string())
     .bind(&t)
     .bind(&t)
     .execute(&state.db)
@@ -318,9 +327,108 @@ async fn save_template(state: State<'_, AppState>, input: TemplateInput) -> Resu
     .map_err(err)?;
     Ok(x)
 }
+const STARTER_TEMPLATES: &[(&str, &str, &str, &str)] = &[
+    (
+        "First touch — observation",
+        "first_touch",
+        "Quick idea for {{company|your team}}",
+        "Hi {{first_name|there}},\n\nI noticed {{company|your team}} {{signal|is growing}} and had one specific thought about {{topic|your outbound}}.\n\nWorth a quick look?\n\n— {{sender_name|the team}}\n\nNot relevant? Reply \"stop\" and I won't follow up.",
+    ),
+    (
+        "First touch — referral",
+        "first_touch",
+        "{{referrer|A colleague}} suggested I reach out",
+        "Hi {{first_name|there}},\n\n{{referrer|A colleague}} mentioned {{company|your team}} is working on {{topic|outbound}}. We helped a similar team with one concrete change.\n\nOpen to a short note on what that looked like?\n\n— {{sender_name|the team}}\n\nReply \"stop\" to opt out.",
+    ),
+    (
+        "First touch — very short",
+        "first_touch",
+        "{{company|Your team}} + one idea",
+        "Hi {{first_name|there}},\n\nOne idea for {{company|your team}}: {{idea|tighten the first touch}}.\n\nWant the one-line version?\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Follow-up — new value",
+        "follow_up",
+        "Re: Quick idea for {{company|your team}}",
+        "Hi {{first_name|there}},\n\nAdding one thing I left out: {{proof_point|teams like yours cut manual follow-up in half}}.\n\nStill worth a look?\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Follow-up — proof point",
+        "follow_up",
+        "Re: {{company|your team}}",
+        "Hi {{first_name|there}},\n\nShort proof point: {{proof_point|a 40-person team removed 6 hours of weekly admin in a month}}.\n\nHappy to send the two-line summary.\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Follow-up — different angle",
+        "follow_up",
+        "Re: one more angle on {{company|your team}}",
+        "Hi {{first_name|there}},\n\nComing at this differently: {{angle|what happens to replies nobody sees for a day}}.\n\nIf it's not a fit, no problem.\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Breakup — polite close",
+        "breakup",
+        "Closing the loop on {{company|your team}}",
+        "Hi {{first_name|there}},\n\nI'll stop here to keep your inbox clear. If {{topic|this}} becomes relevant later, just reply and I'll pick it back up.\n\nAll the best,\n{{sender_name|the team}}",
+    ),
+    (
+        "Breakup — short",
+        "breakup",
+        "Last note from me",
+        "Hi {{first_name|there}},\n\nI'll leave it here. Reply anytime if it's worth a look.\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Reply — ask for a meeting",
+        "reply_positive",
+        "Re: {{company|your team}}",
+        "Hi {{first_name|there}},\n\nGlad it landed. Would 20 minutes this week work? I'll keep it to one screen of notes.\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Reply — answer a question",
+        "reply_question",
+        "Re: {{company|your team}}",
+        "Hi {{first_name|there}},\n\nGood question — short answer: {{answer|yes, it runs fully locally and sends only after approval}}.\n\nWant the longer version?\n\n— {{sender_name|the team}}",
+    ),
+    (
+        "Reply — not now (60 days)",
+        "reply_not_now",
+        "Re: {{company|your team}}",
+        "Hi {{first_name|there}},\n\nUnderstood — I'll check back in about 60 days. If anything changes sooner, just reply here.\n\n— {{sender_name|the team}}",
+    ),
+];
+
+#[tauri::command]
+async fn seed_templates(state: State<'_, AppState>) -> Result<usize> {
+    let existing = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM templates")
+        .fetch_one(&state.db)
+        .await
+        .map_err(err)?;
+    if existing > 0 {
+        return Err("The template library already has templates".into());
+    }
+    let mut count = 0;
+    for &(name, purpose, subject, body) in STARTER_TEMPLATES {
+        let t = now();
+        sqlx::query(
+            "INSERT INTO templates(id,name,subject,body,purpose,variants,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        )
+        .bind(id())
+        .bind(name)
+        .bind(subject)
+        .bind(body)
+        .bind(purpose)
+        .bind("[]")
+        .bind(&t)
+        .bind(&t)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+        count += 1;
+    }
+    Ok(count)
+}
 #[tauri::command]
 async fn list_templates(state: State<'_, AppState>) -> Result<Vec<Value>> {
-    sqlx::query("SELECT id,name,subject,body FROM templates ORDER BY updated_at DESC").fetch_all(&state.db).await.map_err(err).map(|rs|rs.iter().map(|r|json!({"id":r.get::<String,_>("id"),"name":r.get::<String,_>("name"),"subject":r.get::<String,_>("subject"),"body":r.get::<String,_>("body")})).collect())
+    sqlx::query("SELECT id,name,subject,body,purpose,variants FROM templates ORDER BY updated_at DESC").fetch_all(&state.db).await.map_err(err).map(|rs|rs.iter().map(|r|json!({"id":r.get::<String,_>("id"),"name":r.get::<String,_>("name"),"subject":r.get::<String,_>("subject"),"body":r.get::<String,_>("body"),"purpose":r.get::<String,_>("purpose"),"variants":serde_json::from_str::<Value>(&r.get::<String,_>("variants")).unwrap_or(json!([]))})).collect())
 }
 #[tauri::command]
 async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Result<String> {
@@ -680,45 +788,67 @@ async fn process_due(st: &AppState) -> Result<()> {
     }
     Ok(())
 }
-fn render(text: &str, lead: &sqlx::sqlite::SqliteRow) -> String {
-    let mut v = text.to_string();
-    for (k, val) in [
-        (
-            "first_name",
-            lead.get::<Option<String>, _>("first_name")
-                .unwrap_or_default(),
-        ),
-        (
-            "last_name",
-            lead.get::<Option<String>, _>("last_name")
-                .unwrap_or_default(),
-        ),
-        (
-            "company",
-            lead.get::<Option<String>, _>("company").unwrap_or_default(),
-        ),
-        ("email", lead.get::<String, _>("email")),
-    ] {
-        v = v.replace(&format!("{{{{{}}}}}", k), &val)
+// Resolve `{{key}}` and `{{key|fallback}}` against a lookup that reads the lead's
+// standard columns first, then any CSV/XLSX header preserved in custom_fields.
+fn resolve_variables(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let (key, fallback) = match after[..end].split_once('|') {
+                    Some((key, fallback)) => (key.trim(), Some(fallback.trim())),
+                    None => (after[..end].trim(), None),
+                };
+                match lookup(key).filter(|value| !value.is_empty()) {
+                    Some(value) => out.push_str(&value),
+                    None => out.push_str(fallback.unwrap_or("")),
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str("{{");
+                rest = after;
+            }
+        }
     }
-    // Every source column is preserved in custom_fields during import. Resolve those
-    // keys verbatim so templates can use {{Any CSV Header}} without a schema change.
+    out.push_str(rest);
+    out
+}
+
+fn render(text: &str, lead: &sqlx::sqlite::SqliteRow) -> String {
+    // Every source column is preserved in custom_fields during import, so templates can
+    // use {{Any CSV Header}} without a schema change. Standard columns come first.
     let custom = lead
         .try_get::<String, _>("custom_fields")
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    if let Some(Value::Object(fields)) = custom {
-        for (key, value) in fields {
-            let replacement = match value {
-                Value::String(value) => value,
-                Value::Number(value) => value.to_string(),
-                Value::Bool(value) => value.to_string(),
-                _ => String::new(),
-            };
-            v = v.replace(&format!("{{{{{}}}}}", key), &replacement);
+    let lookup = |key: &str| -> Option<String> {
+        let standard = match key {
+            "first_name" => lead.get::<Option<String>, _>("first_name"),
+            "last_name" => lead.get::<Option<String>, _>("last_name"),
+            "company" => lead.get::<Option<String>, _>("company"),
+            "email" => Some(lead.get::<String, _>("email")),
+            _ => None,
+        };
+        if standard.is_some() {
+            return standard;
         }
-    }
-    v
+        if let Some(Value::Object(fields)) = &custom {
+            if let Some(value) = fields.get(key) {
+                return Some(match value {
+                    Value::String(value) => value.clone(),
+                    Value::Number(value) => value.to_string(),
+                    Value::Bool(value) => value.to_string(),
+                    _ => String::new(),
+                });
+            }
+        }
+        None
+    };
+    resolve_variables(text, &lookup)
 }
 async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
     let p: Value = serde_json::from_str(payload).map_err(err)?;
@@ -752,6 +882,17 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
     let to = lead.get::<String, _>("email");
     let subject = render(&c.get::<String, _>("subject"), &lead);
     let body = render(&c.get::<String, _>("body"), &lead);
+    // Never send a literal placeholder: block the send and flag the lead for review.
+    if subject.contains("{{") || body.contains("{{") {
+        sqlx::query("UPDATE leads SET status='needs_attention',updated_at=? WHERE id=?")
+            .bind(now())
+            .bind(lead_id)
+            .execute(&st.db)
+            .await
+            .map_err(err)?;
+        log(&st.db, "warn", "template_variable_missing", lead_id).await;
+        return Err("Template has unresolved variables; send blocked and lead flagged".into());
+    }
     let provider = a.get::<String, _>("provider");
     let response = if provider == "gmail" {
         let raw=format!("To: {}\r\nFrom: {}\r\nSubject: {}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n{}",to,a.get::<String,_>("email"),subject,body);
@@ -835,6 +976,7 @@ fn main() {
             upsert_leads,
             suppress_lead,
             save_template,
+            seed_templates,
             list_templates,
             save_campaign,
             list_campaigns,
