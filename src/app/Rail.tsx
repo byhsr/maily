@@ -1,4 +1,5 @@
-import { Bot, CircleUserRound, FileText, Mail, Send, Settings2, Sparkles, Users } from "lucide-react";
+import { Bot, CircleUserRound, FileText, Mail, Send, Settings2, Sparkles, Star, Users } from "lucide-react";
+import type { Campaign } from "../lib/types";
 
 const NAV = [
   ["Home", Sparkles],
@@ -12,9 +13,11 @@ type RailProps = {
   page: string;
   onNavigate: (page: string) => void;
   onOpenSettings: () => void;
+  favourites: Campaign[];
+  onOpenFavourites: () => void;
 };
 
-export function Rail({ page, onNavigate, onOpenSettings }: RailProps) {
+export function Rail({ page, onNavigate, onOpenSettings, favourites, onOpenFavourites }: RailProps) {
   return (
     <aside className="rail">
       <div className="wordmark">
@@ -29,6 +32,19 @@ export function Rail({ page, onNavigate, onOpenSettings }: RailProps) {
           {label}
         </button>
       ))}
+      <span className="raillabel">Favourites</span>
+      <div className="favlist">
+        {favourites.length ? (
+          favourites.map((c) => (
+            <button className="favitem" key={c.id} onClick={onOpenFavourites} title={c.name}>
+              <Star size={14} />
+              {c.name}
+            </button>
+          ))
+        ) : (
+          <span className="favempty">Star a campaign to pin it here</span>
+        )}
+      </div>
       <div className="railfoot">
         <button onClick={onOpenSettings}>
           <Settings2 />Settings

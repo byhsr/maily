@@ -14,8 +14,18 @@ import { TemplateDrawer } from "../drawers/TemplateDrawer";
 import { LeadDrawer } from "../drawers/LeadDrawer";
 import { AgentDrawer } from "../drawers/AgentDrawer";
 import { SettingsDrawer } from "../drawers/SettingsDrawer";
+import { CommandBar } from "../ui/CommandBar";
 import { Rail } from "./Rail";
 import { Topbar } from "./Topbar";
+
+function readFavourites(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem("mailyFavourites") || "[]");
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
 
 export function Shell() {
   const [page, setPage] = useState("Home");
@@ -26,6 +36,9 @@ export function Shell() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [note, setNote] = useState("");
+  const [status, setStatus] = useState("All");
+  const [query, setQuery] = useState("");
+  const [favourites, setFavourites] = useState<string[]>(readFavourites);
 
   const tell = (message: string) => {
     setNote(message);
@@ -53,19 +66,52 @@ export function Shell() {
     localStorage.mailyTheme = dark ? "dark" : "light";
   }, [dark]);
 
+  const toggleFavourite = (id: string) => {
+    setFavourites((prev) => {
+      const next = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+      localStorage.setItem("mailyFavourites", JSON.stringify(next));
+      return next;
+    });
+  };
+
   const closeDrawer = () => setDrawer(undefined);
+  const openCampaign = () => setDrawer("campaign");
+  const openLead = () => setDrawer("lead");
+
+  const q = query.trim().toLowerCase();
+  const visibleCampaigns = campaigns.filter(
+    (c) => (status === "All" || c.status === status.toLowerCase()) && (!q || c.name.toLowerCase().includes(q))
+  );
+  const visibleLeads = leads.filter(
+    (l) => !q || l.email.toLowerCase().includes(q) || (l.first_name || "").toLowerCase().includes(q) || (l.company || "").toLowerCase().includes(q)
+  );
+  const favouriteCampaigns = campaigns.filter((c) => favourites.includes(c.id));
 
   return (
     <div className="newapp">
-      <Rail page={page} onNavigate={setPage} onOpenSettings={() => setDrawer("settings")} />
+      <Rail
+        page={page}
+        onNavigate={setPage}
+        onOpenSettings={() => setDrawer("settings")}
+        favourites={favouriteCampaigns}
+        onOpenFavourites={() => setPage("Campaigns")}
+      />
       <main className="workspace">
-        <Topbar page={page} />
-        {page === "Home" && <Home dash={dash} campaigns={campaigns} leads={leads} open={setDrawer} />}
-        {page === "Campaigns" && <Campaigns campaigns={campaigns} open={setDrawer} />}
-        {page === "Leads" && <Leads leads={leads} open={setDrawer} reload={load} tell={tell} />}
+        <Topbar page={page} status={status} onStatus={setStatus} onNewCampaign={openCampaign} />
+        {page === "Home" && <Home dash={dash} campaigns={visibleCampaigns} leads={visibleLeads} open={setDrawer} />}
+        {page === "Campaigns" && (
+          <Campaigns
+            campaigns={visibleCampaigns}
+            open={setDrawer}
+            favourites={favourites}
+            onToggleFavourite={toggleFavourite}
+          />
+        )}
+        {page === "Leads" && <Leads leads={visibleLeads} open={setDrawer} reload={load} tell={tell} />}
         {page === "Templates" && <Templates templates={templates} open={setDrawer} />}
         {page === "Agents" && <Agents open={setDrawer} />}
       </main>
+      <CommandBar value={query} onChange={setQuery} onNewCampaign={openCampaign} onAddLead={openLead} />
       <AnimatePresence>
         {drawer && (
           <Drawer kind={drawer} close={closeDrawer}>
