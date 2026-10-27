@@ -17,7 +17,7 @@ export function Topbar({ page, status, onStatus, onNewCampaign }: TopbarProps) {
       <header className="newhead">
         <div>
           <label>OUTREACH STUDIO</label>
-          <h1>{page === "Home" ? <>Make every <em>hello</em> count.</> : page}</h1>
+          <h1>{page === "Home" ? <>Make every <em>hello</em> count.</> : page === "Canvas" ? "Campaign canvas" : page}</h1>
         </div>
         <div className="headtools">
           <Button onClick={onNewCampaign}>

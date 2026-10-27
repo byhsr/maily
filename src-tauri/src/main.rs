@@ -722,69 +722,663 @@ async fn test_ollama(state: State<'_, AppState>, url: String) -> Result<Vec<Valu
         .collect())
 }
 
-#[derive(Deserialize)]
-struct QueueSend {
-    campaign_id: String,
-    lead_id: String,
-    account_id: String,
-    run_at: Option<String>,
+#[derive(Deserialize, serde::Serialize)]
+struct GraphNode {
+    id: String,
+    #[serde(rename = "type")]
+    node_type: String,
+    #[serde(default)]
+    config: Value,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
 }
+#[derive(Deserialize, serde::Serialize)]
+struct GraphEdge {
+    id: String,
+    from_node: String,
+    to_node: String,
+    #[serde(default = "default_edge_label")]
+    label: String,
+}
+fn default_edge_label() -> String {
+    "next".to_string()
+}
+
 #[tauri::command]
-async fn queue_send(state: State<'_, AppState>, input: QueueSend) -> Result<String> {
+async fn save_campaign_graph(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    nodes: Vec<GraphNode>,
+    edges: Vec<GraphEdge>,
+) -> Result<()> {
+    let mut tx = state.db.begin().await.map_err(err)?;
+    sqlx::query("DELETE FROM campaign_edges WHERE campaign_id=?")
+        .bind(&campaign_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    sqlx::query("DELETE FROM campaign_nodes WHERE campaign_id=?")
+        .bind(&campaign_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    for n in &nodes {
+        if !["start", "email", "delay", "condition", "action", "end"].contains(&n.node_type.as_str()) {
+            return Err(format!("Unknown node type: {}", n.node_type));
+        }
+        sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,?,?,?,?)")
+            .bind(&n.id)
+            .bind(&campaign_id)
+            .bind(&n.node_type)
+            .bind(n.config.to_string())
+            .bind(n.x)
+            .bind(n.y)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    for e in &edges {
+        let label = if ["next", "yes", "no"].contains(&e.label.as_str()) {
+            e.label.clone()
+        } else {
+            "next".to_string()
+        };
+        sqlx::query("INSERT INTO campaign_edges(id,campaign_id,from_node,to_node,label) VALUES(?,?,?,?,?)")
+            .bind(&e.id)
+            .bind(&campaign_id)
+            .bind(&e.from_node)
+            .bind(&e.to_node)
+            .bind(label)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_campaign_graph(state: State<'_, AppState>, campaign_id: String) -> Result<Value> {
+    convert_sequence_steps(&state.db, &campaign_id).await?;
+    let nodes = sqlx::query("SELECT id,type,config_json,x,y FROM campaign_nodes WHERE campaign_id=? ORDER BY y,id")
+        .bind(&campaign_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let node_list: Vec<Value> = nodes
+        .iter()
+        .map(|r| json!({"id":r.get::<String,_>("id"),"type":r.get::<String,_>("type"),"config":serde_json::from_str::<Value>(&r.get::<String,_>("config_json")).unwrap_or(json!({})),"x":r.get::<f64,_>("x"),"y":r.get::<f64,_>("y")}))
+        .collect();
+    let edges = sqlx::query("SELECT id,from_node,to_node,label FROM campaign_edges WHERE campaign_id=?")
+        .bind(&campaign_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let edge_list: Vec<Value> = edges
+        .iter()
+        .map(|r| json!({"id":r.get::<String,_>("id"),"from_node":r.get::<String,_>("from_node"),"to_node":r.get::<String,_>("to_node"),"label":r.get::<String,_>("label")}))
+        .collect();
+    let counts = sqlx::query("SELECT current_node_id, count(*) AS n FROM campaign_leads WHERE campaign_id=? AND current_node_id IS NOT NULL GROUP BY current_node_id")
+        .bind(&campaign_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let count_map: serde_json::Map<String, Value> = counts
+        .iter()
+        .map(|r| (r.get::<String, _>("current_node_id"), json!(r.get::<i64, _>("n"))))
+        .collect();
+    Ok(json!({"nodes":node_list,"edges":edge_list,"counts":count_map}))
+}
+
+#[tauri::command]
+async fn validate_campaign_graph(state: State<'_, AppState>, campaign_id: String) -> Result<Value> {
+    let issues = graph_issues(&state.db, &campaign_id).await?;
+    let messages: Vec<&str> = issues.iter().map(|(message, _)| message.as_str()).collect();
+    let node_ids: Vec<&str> = issues.iter().filter_map(|(_, id)| id.as_deref()).collect();
+    Ok(json!({"valid": messages.is_empty(), "issues": messages, "node_ids": node_ids}))
+}
+
+#[tauri::command]
+async fn preview_path(state: State<'_, AppState>, campaign_id: String, lead_id: String) -> Result<Vec<Value>> {
+    let start: Option<String> =
+        sqlx::query_scalar("SELECT id FROM campaign_nodes WHERE campaign_id=? AND type='start' LIMIT 1")
+            .bind(&campaign_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(err)?;
+    let Some(mut node) = start else { return Err("Graph has no Start node".into()) };
+    let lead = sqlx::query("SELECT * FROM leads WHERE id=?")
+        .bind(&lead_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?
+        .ok_or("Lead not found")?;
+    let mut path = Vec::new();
+    for _ in 0..40 {
+        let row = sqlx::query("SELECT type,config_json FROM campaign_nodes WHERE id=?")
+            .bind(&node)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(err)?;
+        let Some(row) = row else { break };
+        let node_type: String = row.get("type");
+        let config: Value = serde_json::from_str(&row.get::<String, _>("config_json")).unwrap_or(json!({}));
+        let detail = match node_type.as_str() {
+            "email" => {
+                let template_id = config["template_id"].as_str().unwrap_or_default();
+                let t = sqlx::query("SELECT subject FROM templates WHERE id=?")
+                    .bind(template_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(err)?;
+                t.map(|r| render(&r.get::<String, _>("subject"), &lead)).unwrap_or_default()
+            }
+            "delay" => format!("wait {} minutes", config["minutes"].as_i64().unwrap_or(0)),
+            "condition" => format!("branch on {}", config["kind"].as_str().unwrap_or("replied")),
+            "action" => config["kind"].as_str().unwrap_or("action").to_string(),
+            "end" => config["outcome"].as_str().unwrap_or("completed").to_string(),
+            _ => String::new(),
+        };
+        path.push(json!({"id": node, "type": node_type, "detail": detail}));
+        if node_type == "end" {
+            break;
+        }
+        let next: Option<String> = sqlx::query_scalar(
+            "SELECT to_node FROM campaign_edges WHERE campaign_id=? AND from_node=? AND label='next' LIMIT 1",
+        )
+        .bind(&campaign_id)
+        .bind(&node)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?;
+        match next {
+            Some(n) => node = n,
+            None => break,
+        }
+    }
+    Ok(path)
+}
+
+#[tauri::command]
+async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<usize> {
     let c = sqlx::query("SELECT status,mode,approved_at FROM campaigns WHERE id=?")
-        .bind(&input.campaign_id)
+        .bind(&campaign_id)
         .fetch_optional(&state.db)
         .await
         .map_err(err)?
         .ok_or("Campaign not found")?;
-    if c.get::<String, _>("status") != "active"
-        || c.get::<String, _>("mode") != "autonomous"
-        || c.get::<Option<String>, _>("approved_at").is_none()
-    {
-        return Err("Campaign must be approved and active before a send can be queued".into());
+    if c.get::<String, _>("status") == "active" {
+        return Err("Campaign is already running".into());
     }
-    let job = id();
-    let t = now();
-    sqlx::query("INSERT INTO jobs(id,kind,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'send',?,?,?,?,?)").bind(&job).bind(input.run_at.unwrap_or_else(now)).bind(format!("{}:{}:{}",input.campaign_id,input.lead_id,"initial")).bind(json!({"campaign_id":input.campaign_id,"lead_id":input.lead_id,"account_id":input.account_id}).to_string()).bind(&t).bind(&t).execute(&state.db).await.map_err(err)?;
-    Ok(job)
+    if c.get::<String, _>("mode") == "autonomous" && c.get::<Option<String>, _>("approved_at").is_none() {
+        return Err("Autonomous campaigns need explicit approval before launch".into());
+    }
+    let issues = graph_issues(&state.db, &campaign_id).await?;
+    if !issues.is_empty() {
+        let summary = issues.iter().map(|(message, _)| message.as_str()).collect::<Vec<_>>().join("; ");
+        return Err(format!("Graph is not valid: {}", summary));
+    }
+    let start: String =
+        sqlx::query_scalar("SELECT id FROM campaign_nodes WHERE campaign_id=? AND type='start' LIMIT 1")
+            .bind(&campaign_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(err)?;
+    let enrolled = sqlx::query(
+        "INSERT OR IGNORE INTO campaign_leads(campaign_id,lead_id,state,current_node_id,entered_node_at) SELECT ?, id, 'active', ?, ? FROM leads WHERE status='active' AND email NOT IN (SELECT email FROM suppressions)",
+    )
+    .bind(&campaign_id)
+    .bind(&start)
+    .bind(now())
+    .execute(&state.db)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    sqlx::query("UPDATE campaigns SET status='active',updated_at=? WHERE id=?")
+        .bind(now())
+        .bind(&campaign_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    log(&state.db, "info", "campaign_launched", &format!("{} leads", enrolled)).await;
+    Ok(enrolled as usize)
 }
-async fn process_due(st: &AppState) -> Result<()> {
-    let rows=sqlx::query("SELECT id,payload,attempts,max_attempts FROM jobs WHERE state='queued' AND run_at<=? ORDER BY run_at LIMIT 8").bind(now()).fetch_all(&st.db).await.map_err(err)?;
-    for row in rows {
-        let jid = row.get::<String, _>("id");
-        let claimed=sqlx::query("UPDATE jobs SET state='running',locked_at=?,updated_at=? WHERE id=? AND state='queued'").bind(now()).bind(now()).bind(&jid).execute(&st.db).await.map_err(err)?.rows_affected();
-        if claimed == 0 {
+
+#[tauri::command]
+async fn pause_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<()> {
+    sqlx::query("UPDATE campaigns SET status='paused',updated_at=? WHERE id=?")
+        .bind(now())
+        .bind(&campaign_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+/// Convert any legacy linear `sequence_steps` into a Start -> (Delay -> Email)* -> End graph.
+/// Lazy and idempotent: only runs while a campaign still has no nodes.
+async fn convert_sequence_steps(db: &SqlitePool, campaign_id: &str) -> Result<()> {
+    let existing = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM campaign_nodes WHERE campaign_id=?")
+        .bind(campaign_id)
+        .fetch_one(db)
+        .await
+        .map_err(err)?;
+    if existing > 0 {
+        return Ok(());
+    }
+    let steps = sqlx::query("SELECT delay_minutes,template_id FROM sequence_steps WHERE campaign_id=? AND enabled=1 ORDER BY position")
+        .bind(campaign_id)
+        .fetch_all(db)
+        .await
+        .map_err(err)?;
+    if steps.is_empty() {
+        return Ok(());
+    }
+    let mut tx = db.begin().await.map_err(err)?;
+    let start = id();
+    sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,'start','{}',0,0)")
+        .bind(&start)
+        .bind(campaign_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    let mut prev = start;
+    let mut y = 0.0f64;
+    for s in &steps {
+        let delay = s.get::<i64, _>("delay_minutes");
+        if delay > 0 {
+            let node = id();
+            y += 140.0;
+            sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,'delay',?,0,?)")
+                .bind(&node)
+                .bind(campaign_id)
+                .bind(json!({"minutes":delay}).to_string())
+                .bind(y)
+                .execute(&mut *tx)
+                .await
+                .map_err(err)?;
+            sqlx::query("INSERT INTO campaign_edges(id,campaign_id,from_node,to_node,label) VALUES(?,?,?,?,'next')")
+                .bind(id())
+                .bind(campaign_id)
+                .bind(&prev)
+                .bind(&node)
+                .execute(&mut *tx)
+                .await
+                .map_err(err)?;
+            prev = node;
+        }
+        let node = id();
+        y += 140.0;
+        sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,'email',?,0,?)")
+            .bind(&node)
+            .bind(campaign_id)
+            .bind(json!({"template_id":s.get::<String,_>("template_id"),"variant":"a"}).to_string())
+            .bind(y)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+        sqlx::query("INSERT INTO campaign_edges(id,campaign_id,from_node,to_node,label) VALUES(?,?,?,?,'next')")
+            .bind(id())
+            .bind(campaign_id)
+            .bind(&prev)
+            .bind(&node)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+        prev = node;
+    }
+    let end = id();
+    y += 140.0;
+    sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,'end','{\"outcome\":\"completed\"}',0,?)")
+        .bind(&end)
+        .bind(campaign_id)
+        .bind(y)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    sqlx::query("INSERT INTO campaign_edges(id,campaign_id,from_node,to_node,label) VALUES(?,?,?,?,'next')")
+        .bind(id())
+        .bind(campaign_id)
+        .bind(&prev)
+        .bind(&end)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    tx.commit().await.map_err(err)?;
+    Ok(())
+}
+
+/// A graph is invalid when it has no single Start, a cycle that no Delay breaks, a
+/// dangling Email, or a Condition missing a Yes/No branch. Each issue carries the
+/// offending node id when it belongs to one node.
+async fn graph_issues(db: &SqlitePool, campaign_id: &str) -> Result<Vec<(String, Option<String>)>> {
+    let node_rows = sqlx::query("SELECT id,type FROM campaign_nodes WHERE campaign_id=?")
+        .bind(campaign_id)
+        .fetch_all(db)
+        .await
+        .map_err(err)?;
+    let nodes: Vec<(String, String)> = node_rows
+        .iter()
+        .map(|r| (r.get::<String, _>("id"), r.get::<String, _>("type")))
+        .collect();
+    let edge_rows = sqlx::query("SELECT from_node,to_node,label FROM campaign_edges WHERE campaign_id=?")
+        .bind(campaign_id)
+        .fetch_all(db)
+        .await
+        .map_err(err)?;
+    let edges: Vec<(String, String, String)> = edge_rows
+        .iter()
+        .map(|r| (r.get::<String, _>("from_node"), r.get::<String, _>("to_node"), r.get::<String, _>("label")))
+        .collect();
+
+    let mut issues = Vec::new();
+    let starts: Vec<&(String, String)> = nodes.iter().filter(|(_, t)| t == "start").collect();
+    if starts.is_empty() {
+        issues.push(("Graph has no Start node".to_string(), None));
+    } else if starts.len() > 1 {
+        issues.push(("Graph has more than one Start node".to_string(), None));
+    }
+    for (id, node_type) in &nodes {
+        if node_type == "email" && !edges.iter().any(|(from, _, _)| from == id) {
+            issues.push((format!("Email node {} has no outgoing edge", &id[..8.min(id.len())]), Some(id.clone())));
+        }
+        if node_type == "condition" {
+            let yes = edges.iter().any(|(from, _, label)| from == id && label == "yes");
+            let no = edges.iter().any(|(from, _, label)| from == id && label == "no");
+            if !yes || !no {
+                issues.push((
+                    format!("Condition node {} needs both Yes and No branches", &id[..8.min(id.len())]),
+                    Some(id.clone()),
+                ));
+            }
+        }
+    }
+    if cycle_without_delay(&nodes, &edges) {
+        issues.push(("Graph has a cycle that no Delay breaks".to_string(), None));
+    }
+    Ok(issues)
+}
+
+fn cycle_without_delay(nodes: &[(String, String)], edges: &[(String, String, String)]) -> bool {
+    let delay: HashSet<&str> = nodes.iter().filter(|(_, t)| t == "delay").map(|(id, _)| id.as_str()).collect();
+    let mut adj: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (from, to, _) in edges {
+        if delay.contains(from.as_str()) {
             continue;
         }
-        let result = send_job(st, &jid, &row.get::<String, _>("payload")).await;
-        match result {
-            Ok(()) => {
-                sqlx::query("UPDATE jobs SET state='completed',updated_at=? WHERE id=?")
-                    .bind(now())
-                    .bind(&jid)
+        adj.entry(from.clone()).or_default().push(to.clone());
+    }
+    fn dfs(node: &str, adj: &std::collections::HashMap<String, Vec<String>>, state: &mut std::collections::HashMap<String, u8>) -> bool {
+        state.insert(node.to_string(), 1);
+        if let Some(neighbours) = adj.get(node) {
+            for n in neighbours {
+                match state.get(n).copied().unwrap_or(0) {
+                    1 => return true,
+                    0 => {
+                        if dfs(n, adj, state) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        state.insert(node.to_string(), 2);
+        false
+    }
+    let mut state: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
+    let keys: Vec<String> = adj.keys().cloned().collect();
+    for key in keys {
+        if state.get(&key).copied().unwrap_or(0) == 0 && dfs(&key, &adj, &mut state) {
+            return true;
+        }
+    }
+    false
+}
+async fn process_due(st: &AppState) -> Result<()> {
+    // Walk every active lead one node forward toward the end of its campaign graph.
+    let leads = sqlx::query("SELECT cl.campaign_id, cl.lead_id, cl.current_node_id, cl.entered_node_at, cl.account_id FROM campaign_leads cl JOIN campaigns c ON c.id=cl.campaign_id WHERE cl.state='active' AND c.status='active' AND c.approved_at IS NOT NULL AND cl.current_node_id IS NOT NULL LIMIT 12")
+        .fetch_all(&st.db)
+        .await
+        .map_err(err)?;
+    for row in leads {
+        let campaign_id: String = row.get("campaign_id");
+        let lead_id: String = row.get("lead_id");
+        let node_id: Option<String> = row.get("current_node_id");
+        let entered_at: Option<String> = row.get("entered_node_at");
+        let account_id: Option<String> = row.get("account_id");
+        let Some(node_id) = node_id else { continue };
+        if let Err(e) = advance_lead(st, &campaign_id, &lead_id, &node_id, entered_at.as_deref(), account_id.as_deref()).await {
+            log(&st.db, "warn", "graph_advance", &format!("{}: {}", lead_id, e)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn advance_lead(
+    st: &AppState,
+    campaign_id: &str,
+    lead_id: &str,
+    node_id: &str,
+    entered_at: Option<&str>,
+    account_id: Option<&str>,
+) -> Result<()> {
+    let node = sqlx::query("SELECT type,config_json FROM campaign_nodes WHERE id=?")
+        .bind(node_id)
+        .fetch_optional(&st.db)
+        .await
+        .map_err(err)?
+        .ok_or("Node not found")?;
+    let node_type: String = node.get("type");
+    let config: Value = serde_json::from_str(&node.get::<String, _>("config_json")).unwrap_or(json!({}));
+    match node_type.as_str() {
+        "delay" => {
+            let minutes = config["minutes"].as_i64().unwrap_or(0);
+            let due = entered_at
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|dt| dt.with_timezone(&Utc) + Duration::minutes(minutes) <= Utc::now())
+                .unwrap_or(true);
+            if due {
+                move_next(st, campaign_id, lead_id, node_id).await?;
+            }
+        }
+        "email" => {
+            let (job_id, payload) = ensure_job(st, campaign_id, lead_id, node_id, account_id).await?;
+            match send_job(st, &job_id, &payload).await {
+                Ok(()) => {
+                    sqlx::query("UPDATE jobs SET state='completed',updated_at=? WHERE id=?")
+                        .bind(now())
+                        .bind(&job_id)
+                        .execute(&st.db)
+                        .await
+                        .map_err(err)?;
+                    move_next(st, campaign_id, lead_id, node_id).await?;
+                }
+                Err(e) => {
+                    sqlx::query("UPDATE jobs SET state='failed',error=?,updated_at=? WHERE id=?")
+                        .bind(&e)
+                        .bind(now())
+                        .bind(&job_id)
+                        .execute(&st.db)
+                        .await
+                        .map_err(err)?;
+                    return Err(e);
+                }
+            }
+        }
+        "condition" => {
+            let branch = condition_branch(st, lead_id, &config).await?;
+            let target: Option<String> = sqlx::query_scalar(
+                "SELECT to_node FROM campaign_edges WHERE campaign_id=? AND from_node=? AND label=? LIMIT 1",
+            )
+            .bind(campaign_id)
+            .bind(node_id)
+            .bind(&branch)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?;
+            match target {
+                Some(next) => enter_node(st, campaign_id, lead_id, &next).await?,
+                None => move_next(st, campaign_id, lead_id, node_id).await?,
+            }
+        }
+        "action" => {
+            apply_action(st, lead_id, &config).await?;
+            move_next(st, campaign_id, lead_id, node_id).await?;
+        }
+        "end" => {
+            let outcome = config["outcome"].as_str().unwrap_or("completed");
+            sqlx::query("UPDATE campaign_leads SET state='done',outcome=? WHERE campaign_id=? AND lead_id=?")
+                .bind(outcome)
+                .bind(campaign_id)
+                .bind(lead_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+        }
+        _ => move_next(st, campaign_id, lead_id, node_id).await?,
+    }
+    Ok(())
+}
+
+async fn enter_node(st: &AppState, campaign_id: &str, lead_id: &str, node_id: &str) -> Result<()> {
+    sqlx::query("UPDATE campaign_leads SET current_node_id=?,entered_node_at=? WHERE campaign_id=? AND lead_id=?")
+        .bind(node_id)
+        .bind(now())
+        .bind(campaign_id)
+        .bind(lead_id)
+        .execute(&st.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+async fn move_next(st: &AppState, campaign_id: &str, lead_id: &str, from: &str) -> Result<()> {
+    let next: Option<String> = sqlx::query_scalar(
+        "SELECT to_node FROM campaign_edges WHERE campaign_id=? AND from_node=? AND label='next' LIMIT 1",
+    )
+    .bind(campaign_id)
+    .bind(from)
+    .fetch_optional(&st.db)
+    .await
+    .map_err(err)?;
+    match next {
+        Some(node) => enter_node(st, campaign_id, lead_id, &node).await,
+        None => {
+            sqlx::query("UPDATE campaign_leads SET state='done',outcome='completed' WHERE campaign_id=? AND lead_id=?")
+                .bind(campaign_id)
+                .bind(lead_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+            Ok(())
+        }
+    }
+}
+
+async fn ensure_job(
+    st: &AppState,
+    campaign_id: &str,
+    lead_id: &str,
+    node_id: &str,
+    account_id: Option<&str>,
+) -> Result<(String, String)> {
+    let key = format!("{}:{}:{}", campaign_id, lead_id, node_id);
+    if let Some(existing) = sqlx::query("SELECT id,payload FROM jobs WHERE idempotency_key=?")
+        .bind(&key)
+        .fetch_optional(&st.db)
+        .await
+        .map_err(err)?
+    {
+        return Ok((existing.get("id"), existing.get("payload")));
+    }
+    let account = match account_id {
+        Some(value) => value.to_string(),
+        None => sqlx::query_scalar::<_, String>("SELECT id FROM accounts ORDER BY sent_today LIMIT 1")
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?
+            .ok_or("No sending account is connected")?,
+    };
+    let job = id();
+    let payload = json!({"campaign_id":campaign_id,"lead_id":lead_id,"account_id":account}).to_string();
+    sqlx::query("INSERT INTO jobs(id,kind,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'send',?,?,?,?,?)")
+        .bind(&job)
+        .bind(now())
+        .bind(&key)
+        .bind(&payload)
+        .bind(now())
+        .bind(now())
+        .execute(&st.db)
+        .await
+        .map_err(err)?;
+    Ok((job, payload))
+}
+
+async fn condition_branch(st: &AppState, lead_id: &str, config: &Value) -> Result<String> {
+    let kind = config["kind"].as_str().unwrap_or("replied");
+    let email: String = sqlx::query_scalar("SELECT email FROM leads WHERE id=?")
+        .bind(lead_id)
+        .fetch_one(&st.db)
+        .await
+        .map_err(err)?;
+    let count: i64 = match kind {
+        "interested" => sqlx::query_scalar("SELECT count(*) FROM inbox_messages WHERE from_email=? AND intent='interested'")
+            .bind(&email)
+            .fetch_one(&st.db)
+            .await
+            .map_err(err)?,
+        "replied" => sqlx::query_scalar("SELECT count(*) FROM inbox_messages WHERE from_email=?")
+            .bind(&email)
+            .fetch_one(&st.db)
+            .await
+            .map_err(err)?,
+        _ => 0,
+    };
+    Ok(if count > 0 { "yes".to_string() } else { "no".to_string() })
+}
+
+async fn apply_action(st: &AppState, lead_id: &str, config: &Value) -> Result<()> {
+    match config["kind"].as_str().unwrap_or("notify") {
+        "suppress" => {
+            let email: String = sqlx::query_scalar("SELECT email FROM leads WHERE id=?")
+                .bind(lead_id)
+                .fetch_one(&st.db)
+                .await
+                .map_err(err)?;
+            sqlx::query("INSERT OR REPLACE INTO suppressions(email,reason,created_at) VALUES(?,?,?)")
+                .bind(&email)
+                .bind("graph action")
+                .bind(now())
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+            sqlx::query("UPDATE leads SET status='suppressed' WHERE id=?")
+                .bind(lead_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+        }
+        "tag" => {
+            if let Some(tag) = config["tag"].as_str() {
+                sqlx::query("UPDATE leads SET list_name=? WHERE id=?")
+                    .bind(tag)
+                    .bind(lead_id)
                     .execute(&st.db)
                     .await
                     .map_err(err)?;
             }
-            Err(e) => {
-                let attempts = row.get::<i64, _>("attempts") + 1;
-                let terminal = attempts >= row.get::<i64, _>("max_attempts");
-                let next =
-                    (Utc::now() + Duration::minutes(2_i64.pow(attempts as u32))).to_rfc3339();
-                sqlx::query(
-                    "UPDATE jobs SET state=?,attempts=?,run_at=?,error=?,updated_at=? WHERE id=?",
-                )
-                .bind(if terminal { "failed" } else { "queued" })
-                .bind(attempts)
-                .bind(next)
-                .bind(&e)
-                .bind(now())
-                .bind(&jid)
+        }
+        "pause" => {
+            sqlx::query("UPDATE campaign_leads SET state='paused' WHERE lead_id=?")
+                .bind(lead_id)
                 .execute(&st.db)
                 .await
                 .map_err(err)?;
-            }
         }
+        _ => log(&st.db, "info", "graph_action", lead_id).await,
     }
     Ok(())
 }
@@ -992,7 +1586,12 @@ fn main() {
             get_settings,
             save_setting,
             test_ollama,
-            queue_send
+            save_campaign_graph,
+            load_campaign_graph,
+            validate_campaign_graph,
+            preview_path,
+            launch_campaign,
+            pause_campaign
         ])
         .run(tauri::generate_context!())
         .expect("tauri error");

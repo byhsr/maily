@@ -19,6 +19,7 @@
     "@tauri-apps/plugin-stronghold": "latest",
     "@tauri-apps/plugin-window-state": "latest",
     "@vitejs/plugin-react": "latest",
+    "@xyflow/react": "^12.12.0",
     "lucide-react": "latest",
     "motion": "latest",
     "papaparse": "latest",

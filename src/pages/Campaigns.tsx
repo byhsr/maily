@@ -9,9 +9,10 @@ type CampaignsProps = {
   open: (kind: string) => void;
   favourites: string[];
   onToggleFavourite: (id: string) => void;
+  onOpenCanvas: (campaign: Campaign) => void;
 };
 
-export function Campaigns({ campaigns, open, favourites, onToggleFavourite }: CampaignsProps) {
+export function Campaigns({ campaigns, open, favourites, onToggleFavourite, onOpenCanvas }: CampaignsProps) {
   return (
     <section className="sheet">
       <header>
@@ -39,8 +40,8 @@ export function Campaigns({ campaigns, open, favourites, onToggleFavourite }: Ca
               </span>
               <small>{c.leads} leads · {c.mode}</small>
               <Badge>{c.status}</Badge>
-              <Button variant="ghost" onClick={() => open("campaign")}>
-                Edit <ChevronRight />
+              <Button variant="ghost" onClick={() => onOpenCanvas(c)}>
+                Canvas <ChevronRight />
               </Button>
             </div>
           ))}

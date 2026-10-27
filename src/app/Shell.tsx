@@ -8,6 +8,7 @@ import { Campaigns } from "../pages/Campaigns";
 import { Leads } from "../pages/Leads";
 import { Templates } from "../pages/Templates";
 import { Agents } from "../pages/Agents";
+import { CampaignCanvas } from "../canvas/Canvas";
 import { Drawer } from "../drawers/Drawer";
 import { CampaignDrawer } from "../drawers/CampaignDrawer";
 import { TemplateDrawer } from "../drawers/TemplateDrawer";
@@ -39,6 +40,7 @@ export function Shell() {
   const [query, setQuery] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
+  const [canvasId, setCanvasId] = useState<string | undefined>();
 
   const tell = (message: string) => {
     setNote(message);
@@ -107,6 +109,10 @@ export function Shell() {
             open={setDrawer}
             favourites={favourites}
             onToggleFavourite={toggleFavourite}
+            onOpenCanvas={(c) => {
+              setCanvasId(c.id);
+              setPage("Canvas");
+            }}
           />
         )}
         {page === "Leads" && <Leads leads={visibleLeads} open={setDrawer} reload={load} tell={tell} />}
@@ -123,6 +129,9 @@ export function Shell() {
           />
         )}
         {page === "Agents" && <Agents open={setDrawer} />}
+        {page === "Canvas" && (
+          <CampaignCanvas campaigns={campaigns} initialCampaignId={canvasId} templates={templates} leads={leads} tell={tell} />
+        )}
       </main>
       <CommandBar value={query} onChange={setQuery} onNewCampaign={openCampaign} onAddLead={openLead} />
       <AnimatePresence>

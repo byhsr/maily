@@ -997,6 +997,201 @@ hr {
   stroke-linejoin: round;
 }
 
+/* ---------- Campaign canvas ---------- */
+.canvaspage {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.canvastools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvastools select {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.canvaswrap {
+  display: grid;
+  grid-template-columns: 180px 1fr 250px;
+  gap: 12px;
+  align-items: start;
+}
+
+.canvasflow {
+  height: calc(100vh - 290px);
+  min-height: 440px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.palette,
+.inspector,
+.canvasissues,
+.canvaspath {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  background: var(--surface);
+}
+
+.canvaspanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.paletteitem {
+  justify-content: flex-start;
+  padding: 9px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.paletteitem:hover {
+  background: var(--surface-2);
+}
+
+.inspector label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.inspector input,
+.inspector select {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.canvasissues ul,
+.canvaspath ol {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+.canvasissues ul {
+  color: var(--bad);
+}
+
+.canvaspath ol {
+  color: var(--ink-2);
+}
+
+.cfnode {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 170px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+}
+
+.cfnode.sel {
+  border-color: var(--ink);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.cfnode.bad {
+  border-color: var(--bad);
+}
+
+.cfkind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.cfsummary {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cfcount {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-style: normal;
+  text-align: center;
+}
+
+.cfflag {
+  position: absolute;
+  top: -9px;
+  left: -9px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bad);
+  color: #fff;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.cfnode .h-yes,
+.cfnode .h-no {
+  left: 40%;
+}
+
+.cfnode .h-no {
+  left: 66%;
+}
+
+.cfnode .h-yes {
+  background: var(--ok);
+}
+
+.cfnode .h-no {
+  background: var(--ink-3);
+}
+
+@media (max-width: 1100px) {
+  .canvaswrap {
+    grid-template-columns: 1fr;
+  }
+
+  .canvasflow {
+    height: 60vh;
+  }
+}
+
 @media (max-width: 1100px) {
   .boards {
     grid-template-columns: 1fr;
