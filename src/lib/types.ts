@@ -33,3 +33,28 @@ export type DashboardData = {
   accounts?: unknown[];
   events?: unknown[];
 };
+
+export type StatsPoint = {
+  key: string;
+  label: string;
+  sent: number;
+  replied: number;
+  positive: number;
+  failed: number;
+};
+
+export type StatsTotals = {
+  sent: number;
+  replied: number;
+  positive: number;
+  failed: number;
+};
+
+export type DashboardStats = {
+  range: string;
+  series: StatsPoint[];
+  totals: StatsTotals;
+  previous: StatsTotals;
+  needsAttention: number;
+  activeCampaigns: number;
+};

@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Campaign, DashboardData, Lead, Template } from "./types";
+import type { Campaign, DashboardData, DashboardStats, Lead, Template } from "./types";
 
 export const api = <T,>(command: string, args?: Record<string, unknown>) =>
   invoke<T>(command, args);
 
 export const getDashboard = () => api<DashboardData>("dashboard");
+export const dashboardStats = (range: string) => api<DashboardStats>("dashboard_stats", { range });
 export const listCampaigns = () => api<Campaign[]>("list_campaigns");
 export const listLeads = () => api<Lead[]>("list_leads");
 export const listTemplates = () => api<Template[]>("list_templates");

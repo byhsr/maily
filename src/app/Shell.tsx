@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { getDashboard, listCampaigns, listLeads, listTemplates } from "../lib/api";
-import type { Campaign, DashboardData, Lead, Template } from "../lib/types";
+import { listCampaigns, listLeads, listTemplates } from "../lib/api";
+import type { Campaign, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
 import { Leads } from "../pages/Leads";
@@ -31,7 +31,6 @@ export function Shell() {
   const [page, setPage] = useState("Home");
   const [drawer, setDrawer] = useState<string | undefined>();
   const [dark, setDark] = useState(localStorage.mailyTheme !== "light");
-  const [dash, setDash] = useState<DashboardData>({});
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
@@ -47,8 +46,7 @@ export function Shell() {
 
   const load = async () => {
     try {
-      const [d, c, l, t] = await Promise.all([getDashboard(), listCampaigns(), listLeads(), listTemplates()]);
-      setDash(d);
+      const [c, l, t] = await Promise.all([listCampaigns(), listLeads(), listTemplates()]);
       setCampaigns(c);
       setLeads(l);
       setTemplates(t);
@@ -98,7 +96,7 @@ export function Shell() {
       />
       <main className="workspace">
         <Topbar page={page} status={status} onStatus={setStatus} onNewCampaign={openCampaign} />
-        {page === "Home" && <Home dash={dash} campaigns={visibleCampaigns} leads={visibleLeads} open={setDrawer} />}
+        {page === "Home" && <Home campaigns={visibleCampaigns} open={setDrawer} />}
         {page === "Campaigns" && (
           <Campaigns
             campaigns={visibleCampaigns}

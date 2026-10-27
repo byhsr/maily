@@ -1,9 +1,10 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use chrono::{Duration, Utc};
+use chrono::{Datelike, Days, Duration, Months, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use tauri::{Manager, State};
 use tokio::sync::Semaphore;
@@ -124,6 +125,126 @@ async fn dashboard(state: State<'_, AppState>) -> Result<Value> {
 }
 fn row_json(r: &sqlx::sqlite::SqliteRow) -> Value {
     json!({"id":r.try_get::<String,_>("id").unwrap_or_default(),"provider":r.try_get::<String,_>("provider").unwrap_or_default(),"email":r.try_get::<String,_>("email").unwrap_or_default(),"health":r.try_get::<String,_>("health").unwrap_or_default(),"daily_limit":r.try_get::<i64,_>("daily_limit").unwrap_or(0),"hourly_limit":r.try_get::<i64,_>("hourly_limit").unwrap_or(0),"sent_today":r.try_get::<i64,_>("sent_today").unwrap_or(0),"last_health_at":r.try_get::<String,_>("last_health_at").unwrap_or_default()})
+}
+
+fn window_keys(range: &str) -> (Vec<(String, String)>, bool) {
+    let now = Utc::now();
+    if range == "year" {
+        let base = now.date_naive().with_day(1).unwrap_or_else(|| now.date_naive());
+        let keys = (0..12u32)
+            .rev()
+            .map(|i| {
+                let m = base.checked_sub_months(Months::new(i)).unwrap_or(base);
+                (m.format("%Y-%m").to_string(), m.format("%b").to_string())
+            })
+            .collect::<Vec<_>>();
+        (keys, true)
+    } else {
+        let days = if range == "month" { 30u64 } else { 7u64 };
+        let keys = (0..days)
+            .rev()
+            .map(|i| {
+                let d = now.date_naive() - Days::new(i);
+                (d.format("%Y-%m-%d").to_string(), d.format("%d").to_string())
+            })
+            .collect::<Vec<_>>();
+        (keys, false)
+    }
+}
+
+fn bucket_key(created_at: &str, monthly: bool) -> Option<String> {
+    let width = if monthly { 7 } else { 10 };
+    if created_at.len() >= width {
+        Some(created_at[..width].to_string())
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+async fn dashboard_stats(state: State<'_, AppState>, range: Option<String>) -> Result<Value> {
+    let range = range.unwrap_or_else(|| "week".to_string());
+    let (keys, monthly) = window_keys(&range);
+    let day_count = if range == "month" { 30u64 } else { 7u64 };
+
+    let mut current: BTreeMap<String, [i64; 4]> = keys.iter().map(|(k, _)| (k.clone(), [0; 4])).collect();
+    let previous: HashSet<String> = if monthly {
+        let base = Utc::now().date_naive().with_day(1).unwrap_or_else(|| Utc::now().date_naive());
+        (12..24u32)
+            .map(|i| base.checked_sub_months(Months::new(i)).unwrap_or(base).format("%Y-%m").to_string())
+            .collect()
+    } else {
+        (day_count..day_count * 2)
+            .map(|i| (Utc::now().date_naive() - Days::new(i)).format("%Y-%m-%d").to_string())
+            .collect()
+    };
+    let mut prev = [0i64; 4];
+
+    let logs = sqlx::query("SELECT status, created_at FROM send_logs")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    for row in logs {
+        let created: String = row.get("created_at");
+        let Some(key) = bucket_key(&created, monthly) else { continue };
+        let slot = if row.get::<String, _>("status") == "sent" { 0 } else { 3 };
+        if let Some(v) = current.get_mut(&key) {
+            v[slot] += 1;
+        } else if previous.contains(&key) {
+            prev[slot] += 1;
+        }
+    }
+
+    let messages = sqlx::query("SELECT intent, received_at FROM inbox_messages")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    for row in messages {
+        let received: Option<String> = row.get("received_at");
+        let Some(received) = received else { continue };
+        let Some(key) = bucket_key(&received, monthly) else { continue };
+        let positive = row.get::<Option<String>, _>("intent").as_deref() == Some("interested");
+        if let Some(v) = current.get_mut(&key) {
+            v[1] += 1;
+            if positive {
+                v[2] += 1;
+            }
+        } else if previous.contains(&key) {
+            prev[1] += 1;
+            if positive {
+                prev[2] += 1;
+            }
+        }
+    }
+
+    let series: Vec<Value> = keys
+        .iter()
+        .map(|(key, label)| {
+            let v = current.get(key).copied().unwrap_or([0; 4]);
+            json!({"key": key, "label": label, "sent": v[0], "replied": v[1], "positive": v[2], "failed": v[3]})
+        })
+        .collect();
+    let sum = |slot: usize| current.values().map(|v| v[slot]).sum::<i64>();
+    let (sent, replied, positive, failed) = (sum(0), sum(1), sum(2), sum(3));
+    let needs_attention =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM inbox_messages WHERE intent IS NULL")
+            .fetch_one(&state.db)
+            .await
+            .map_err(err)?;
+    let active_campaigns =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM campaigns WHERE status='active'")
+            .fetch_one(&state.db)
+            .await
+            .map_err(err)?;
+
+    Ok(json!({
+        "range": range,
+        "series": series,
+        "totals": {"sent": sent, "replied": replied, "positive": positive, "failed": failed},
+        "previous": {"sent": prev[0], "replied": prev[1], "positive": prev[2], "failed": prev[3]},
+        "needsAttention": needs_attention,
+        "activeCampaigns": active_campaigns
+    }))
 }
 
 #[tauri::command]
@@ -709,6 +830,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             dashboard,
+            dashboard_stats,
             list_leads,
             upsert_leads,
             suppress_lead,
