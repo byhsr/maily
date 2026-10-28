@@ -203,7 +203,6 @@ export function Shell() {
               campaigns={campaigns}
               initialCampaignId={canvasId}
               templates={templates}
-              leads={leads}
               tell={tell}
               onSelect={setCanvasId}
               reload={load}

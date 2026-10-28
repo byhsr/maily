@@ -18,12 +18,11 @@ import {
   launchCampaign,
   loadCampaignGraph,
   pauseCampaign,
-  previewPath,
   saveCampaign,
   saveCampaignGraph,
   validateCampaignGraph,
 } from "../lib/api";
-import type { Campaign, Lead, NodeType, Template } from "../lib/types";
+import type { Campaign, NodeType, Template } from "../lib/types";
 import { Input } from "../ui/Input";
 import {
   NODE_META,
@@ -48,22 +47,19 @@ type CampaignCanvasProps = {
   campaigns: Campaign[];
   initialCampaignId?: string;
   templates: Template[];
-  leads: Lead[];
   tell: (message: string) => void;
   onSelect: (campaignId?: string) => void;
   reload: () => void;
   onBack: () => void;
 };
 
-export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads, tell, onSelect, reload, onBack }: CampaignCanvasProps) {
+export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, onSelect, reload, onBack }: CampaignCanvasProps) {
   const [campaignId, setCampaignId] = useState(initialCampaignId ?? "");
   const [creating, setCreating] = useState(!initialCampaignId);
   const [draftName, setDraftName] = useState("");
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<CampaignNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [issues, setIssues] = useState<string[]>([]);
-  const [path, setPath] = useState<string[]>([]);
-  const [previewLead, setPreviewLead] = useState("");
   const [selected, setSelected] = useState<string>();
   const [running, setRunning] = useState(false);
 
@@ -79,7 +75,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
       setNodes(toFlow(base, graph.counts, templates, []));
       setEdges(toEdges(base.edges));
       setIssues([]);
-      setPath([]);
       setSelected(undefined);
     },
     [setNodes, setEdges, templates]
@@ -251,19 +246,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
     }
   };
 
-  const runPreview = async () => {
-    if (!previewLead) {
-      tell("Pick a lead to preview the path");
-      return;
-    }
-    try {
-      const steps = await previewPath(campaignId, previewLead);
-      setPath(steps.map((step) => `${NODE_META[step.type].label}${step.detail ? ` · ${step.detail}` : ""}`));
-    } catch (e) {
-      tell(String(e));
-    }
-  };
-
   const selectedNode = nodes.find((node) => node.id === selected);
 
   return (
@@ -330,22 +312,11 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
               <Plus />
               New
             </button>
-            <select className="cv-pill" value={previewLead} onChange={(e) => setPreviewLead(e.target.value)}>
-              <option value="">Preview as…</option>
-              {leads.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.email}
-                </option>
-              ))}
-            </select>
             <button className="cv-pill" onClick={autoLayout}>
               Layout
             </button>
             <button className="cv-pill" onClick={runValidate}>
               Validate
-            </button>
-            <button className="cv-pill" onClick={runPreview}>
-              Preview
             </button>
             {running ? (
               <button className="cv-run" onClick={runPause}>
@@ -411,16 +382,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
                     <li key={issue}>{issue}</li>
                   ))}
                 </ul>
-              </div>
-            )}
-            {path.length > 0 && (
-              <div className="cv-panel">
-                <h4>Preview path</h4>
-                <ol className="cv-path">
-                  {path.map((step, index) => (
-                    <li key={index}>{step}</li>
-                  ))}
-                </ol>
               </div>
             )}
           </div>

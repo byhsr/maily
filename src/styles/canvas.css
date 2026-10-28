@@ -528,13 +528,6 @@ textarea.cv-inset {
   font-size: 12px;
 }
 
-.cv-path {
-  margin: 0;
-  padding-left: 16px;
-  color: var(--cv-ink-2);
-  font-size: 12px;
-}
-
 /* ---------- Results table ---------- */
 .res-page {
   display: flex;
