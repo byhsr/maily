@@ -1,10 +1,9 @@
-import { Bell, Bot, CircleUserRound, FileText, Home, Inbox as InboxIcon, MoreHorizontal, Send, Star, Users, Workflow } from "lucide-react";
+import { Bell, Bot, CircleUserRound, FileText, Home, Inbox as InboxIcon, MoreHorizontal, Send, Star, Users } from "lucide-react";
 import type { Campaign } from "../lib/types";
 
 const NAV = [
   ["Home", Home],
   ["Campaigns", Send],
-  ["Canvas", Workflow],
   ["Leads", Users],
   ["Templates", FileText],
   ["Inbox", InboxIcon],
@@ -45,6 +44,8 @@ export function Sidebar({
   notifications,
 }: SidebarProps) {
   const rail = collapsed && !mobile;
+  // The canvas is reached from Campaigns, so keep Campaigns lit while it is open.
+  const active = page === "Canvas" ? "Campaigns" : page;
   const go = (target: string) => {
     onNavigate(target);
     if (mobile) onClose();
@@ -59,7 +60,7 @@ export function Sidebar({
       <nav className="navlist">
         {NAV.map(([label, Icon]) => (
           <button
-            className={page === label ? "navlink on" : "navlink"}
+            className={active === label ? "navlink on" : "navlink"}
             onClick={() => go(label)}
             title={rail ? label : undefined}
             key={label}
