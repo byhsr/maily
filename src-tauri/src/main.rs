@@ -215,10 +215,12 @@ struct TemplateInput {
 }
 #[derive(Deserialize)]
 struct KnowledgeInput {
+    id: Option<String>,
     category: String,
     title: String,
     content: String,
     approved: bool,
+    tags: Option<Value>,
 }
 #[derive(Deserialize)]
 struct AgentInput {
@@ -654,16 +656,153 @@ async fn set_campaign_status(
         .map_err(err)?;
     Ok(())
 }
+/// The categories the knowledge base understands. Mirrored in src/lib/knowledge.ts.
+const KNOWLEDGE_CATEGORIES: [&str; 7] = ["offer", "icp", "style", "proof", "objection", "product", "other"];
+
 #[tauri::command]
 async fn save_knowledge(state: State<'_, AppState>, input: KnowledgeInput) -> Result<String> {
-    let x = id();
+    let category = input.category.trim().to_lowercase();
+    if !KNOWLEDGE_CATEGORIES.contains(&category.as_str()) {
+        return Err(format!("Unknown knowledge category: {category}"));
+    }
+    let title = input.title.trim().to_string();
+    if title.is_empty() || input.content.trim().is_empty() {
+        return Err("A knowledge entry needs both a title and some content".into());
+    }
+    let tags = input.tags.filter(|value| value.is_array()).unwrap_or_else(|| json!([]));
     let t = now();
-    sqlx::query("INSERT INTO knowledge(id,category,title,content,approved,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").bind(&x).bind(input.category).bind(input.title).bind(input.content).bind(input.approved as i64).bind(&t).bind(&t).execute(&state.db).await.map_err(err)?;
-    Ok(x)
+    let entry_id = match input.id.filter(|value| !value.trim().is_empty()) {
+        Some(existing) => {
+            let updated = sqlx::query(
+                "UPDATE knowledge SET category=?,title=?,content=?,approved=?,tags=?,updated_at=? WHERE id=?",
+            )
+            .bind(&category)
+            .bind(&title)
+            .bind(&input.content)
+            .bind(input.approved as i64)
+            .bind(tags.to_string())
+            .bind(&t)
+            .bind(&existing)
+            .execute(&state.db)
+            .await
+            .map_err(err)?
+            .rows_affected();
+            if updated == 0 {
+                return Err("That knowledge entry no longer exists".into());
+            }
+            existing
+        }
+        None => {
+            let fresh = id();
+            sqlx::query(
+                "INSERT INTO knowledge(id,category,title,content,approved,tags,source,created_at,updated_at) VALUES(?,?,?,?,?,?,'manual',?,?)",
+            )
+            .bind(&fresh)
+            .bind(&category)
+            .bind(&title)
+            .bind(&input.content)
+            .bind(input.approved as i64)
+            .bind(tags.to_string())
+            .bind(&t)
+            .bind(&t)
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+            fresh
+        }
+    };
+    Ok(entry_id)
 }
 #[tauri::command]
-async fn list_knowledge(state: State<'_, AppState>) -> Result<Vec<Value>> {
-    sqlx::query("SELECT id,category,title,content,approved FROM knowledge ORDER BY updated_at DESC").fetch_all(&state.db).await.map_err(err).map(|rs|rs.iter().map(|r|json!({"id":r.get::<String,_>("id"),"category":r.get::<String,_>("category"),"title":r.get::<String,_>("title"),"content":r.get::<String,_>("content"),"approved":r.get::<i64,_>("approved")!=0})).collect())
+async fn delete_knowledge(state: State<'_, AppState>, id: String) -> Result<()> {
+    sqlx::query("DELETE FROM knowledge WHERE id=?")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+#[tauri::command]
+async fn list_knowledge(
+    state: State<'_, AppState>,
+    category: Option<String>,
+    approved_only: Option<bool>,
+) -> Result<Vec<Value>> {
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id,category,title,content,approved,tags,source,updated_at FROM knowledge WHERE 1=1",
+    );
+    if let Some(name) = category.filter(|value| !value.trim().is_empty()) {
+        builder.push(" AND category = ").push_bind(name);
+    }
+    if approved_only.unwrap_or(false) {
+        builder.push(" AND approved = 1");
+    }
+    builder.push(" ORDER BY weight DESC, updated_at DESC");
+    let rows = builder.build().fetch_all(&state.db).await.map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "category": r.get::<String, _>("category"),
+                "title": r.get::<String, _>("title"),
+                "content": r.get::<String, _>("content"),
+                "approved": r.get::<i64, _>("approved") != 0,
+                "tags": serde_json::from_str::<Value>(&r.get::<String, _>("tags")).unwrap_or(json!([])),
+                "source": r.get::<String, _>("source"),
+                "updated_at": r.get::<String, _>("updated_at"),
+            })
+        })
+        .collect())
+}
+
+/// Renders approved entries as one prompt block. This is the single place
+/// knowledge reaches a model, used by agents and the reply classifier.
+/// An empty category list means every approved entry.
+async fn knowledge_context(db: &SqlitePool, categories: &[String]) -> String {
+    let mut builder =
+        sqlx::QueryBuilder::new("SELECT category,title,content FROM knowledge WHERE approved = 1");
+    let wanted: Vec<&String> = categories
+        .iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect();
+    if !wanted.is_empty() {
+        builder.push(" AND category IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for category in wanted {
+                separated.push_bind(category);
+            }
+            separated.push_unseparated(")");
+        }
+    }
+    builder.push(" ORDER BY weight DESC, updated_at DESC");
+    let rows = match builder.build().fetch_all(db).await {
+        Ok(rows) => rows,
+        Err(_) => return String::new(),
+    };
+
+    const BUDGET: usize = 6000;
+    let mut out = String::new();
+    for row in rows {
+        let block = format!(
+            "## {} — {}\n{}\n\n",
+            row.get::<String, _>("category").to_uppercase(),
+            row.get::<String, _>("title"),
+            row.get::<String, _>("content").trim()
+        );
+        if out.len() + block.len() > BUDGET {
+            break;
+        }
+        out.push_str(&block);
+    }
+    out.trim_end().to_string()
+}
+
+/// The exact block a model would receive, so the UI can show it rather than guess.
+#[tauri::command]
+async fn preview_knowledge(state: State<'_, AppState>, categories: Option<Vec<String>>) -> Result<String> {
+    Ok(knowledge_context(&state.db, &categories.unwrap_or_default()).await)
 }
 
 #[tauri::command]
@@ -2471,7 +2610,9 @@ fn main() {
             approve_campaign,
             set_campaign_status,
             save_knowledge,
+            delete_knowledge,
             list_knowledge,
+            preview_knowledge,
             start_oauth,
             finish_oauth,
             run_agent,

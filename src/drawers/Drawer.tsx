@@ -7,6 +7,7 @@ const TITLES: Record<string, string> = {
   settings: "Settings",
   agent: "Agent",
   lead: "Lead",
+  knowledge: "Knowledge",
 };
 
 type DrawerProps = {

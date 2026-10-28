@@ -1,4 +1,4 @@
-import { Bell, Bot, CircleUserRound, FileText, Home, Inbox as InboxIcon, MoreHorizontal, Send, Star, Users } from "lucide-react";
+import { Bell, BookOpen, Bot, CircleUserRound, FileText, Home, Inbox as InboxIcon, MoreHorizontal, Send, Star, Users } from "lucide-react";
 import type { Campaign } from "../lib/types";
 
 const NAV = [
@@ -6,6 +6,7 @@ const NAV = [
   ["Campaigns", Send],
   ["Leads", Users],
   ["Templates", FileText],
+  ["Knowledge", BookOpen],
   ["Inbox", InboxIcon],
   ["Agents", Bot],
 ] as const;

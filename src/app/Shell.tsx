@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { deleteCampaign, listCampaigns, listChannels, listLeads, listTemplates, saveCampaign } from "../lib/api";
-import type { Campaign, Lead, Template } from "../lib/types";
+import { deleteCampaign, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, saveCampaign } from "../lib/api";
+import type { Campaign, KnowledgeEntry, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
 import { Leads } from "../pages/Leads";
 import { Inbox } from "../pages/Inbox";
 import { Templates } from "../pages/Templates";
+import { Knowledge } from "../pages/Knowledge";
 import { Agents } from "../pages/Agents";
 import { CampaignCanvas } from "../canvas/Canvas";
 import { Drawer } from "../drawers/Drawer";
@@ -15,6 +16,7 @@ import { TemplateDrawer } from "../drawers/TemplateDrawer";
 import { LeadDrawer } from "../drawers/LeadDrawer";
 import { AgentDrawer } from "../drawers/AgentDrawer";
 import { SettingsDrawer } from "../drawers/SettingsDrawer";
+import { KnowledgeDrawer } from "../drawers/KnowledgeDrawer";
 import { Sidebar } from "./Sidebar";
 import { Titlebar } from "./Titlebar";
 import { NavContext } from "./nav";
@@ -48,9 +50,11 @@ export function Shell() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
   const [note, setNote] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
+  const [editingKnowledge, setEditingKnowledge] = useState<KnowledgeEntry | undefined>();
   const [canvasId, setCanvasId] = useState<string | undefined>();
   const [unread, setUnread] = useState(0);
   const [collapsed, setCollapsed] = useState(readCollapsed);
@@ -65,10 +69,11 @@ export function Shell() {
 
   const load = async () => {
     try {
-      const [c, l, t] = await Promise.all([listCampaigns(), listLeads(), listTemplates()]);
+      const [c, l, t, k] = await Promise.all([listCampaigns(), listLeads(), listTemplates(), listKnowledge()]);
       setCampaigns(c);
       setLeads(l);
       setTemplates(t);
+      setKnowledge(k);
     } catch (e) {
       tell(String(e));
     }
@@ -137,6 +142,7 @@ export function Shell() {
   const closeDrawer = () => {
     setDrawer(undefined);
     setEditingTemplate(undefined);
+    setEditingKnowledge(undefined);
   };
 
   const openCampaign = (campaign: Campaign) => {
@@ -216,6 +222,16 @@ export function Shell() {
               tell={tell}
             />
           )}
+          {page === "Knowledge" && (
+            <Knowledge
+              entries={knowledge}
+              open={setDrawer}
+              onEdit={(entry) => {
+                setEditingKnowledge(entry);
+                setDrawer("knowledge");
+              }}
+            />
+          )}
           {page === "Agents" && <Agents open={setDrawer} />}
           {page === "Canvas" && (
             <CampaignCanvas
@@ -237,6 +253,9 @@ export function Shell() {
               )}
               {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
               {drawer === "agent" && <AgentDrawer tell={tell} />}
+              {drawer === "knowledge" && (
+                <KnowledgeDrawer close={closeDrawer} entry={editingKnowledge} reload={load} tell={tell} />
+              )}
               {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} />}
             </Drawer>
           )}

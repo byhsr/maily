@@ -10,6 +10,7 @@ import type {
   GraphValidation,
   InboxMessage,
   InboxThread,
+  KnowledgeEntry,
   Lead,
   LeadList,
   LlmModel,
@@ -68,3 +69,10 @@ export const markInboxRead = (messageId: string, read: boolean) => api<void>("ma
 export const snoozeInbox = (messageId: string, until: string) => api<void>("snooze_inbox", { messageId, until });
 export const inboxThread = (messageId: string) => api<InboxThread>("inbox_thread", { messageId });
 export const suppressLead = (email: string, reason: string) => api<void>("suppress_lead", { email, reason });
+
+export const listKnowledge = (category?: string, approvedOnly = false) =>
+  api<KnowledgeEntry[]>("list_knowledge", { category: category ?? null, approvedOnly });
+export const saveKnowledge = (input: Record<string, unknown>) => api<string>("save_knowledge", { input });
+export const deleteKnowledge = (id: string) => api<void>("delete_knowledge", { id });
+export const previewKnowledge = (categories?: string[]) =>
+  api<string>("preview_knowledge", { categories: categories ?? null });

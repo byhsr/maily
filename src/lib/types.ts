@@ -46,6 +46,20 @@ export type OllamaModel = {
   modified_at?: string;
 };
 
+export type KnowledgeCategory = "offer" | "icp" | "style" | "proof" | "objection" | "product" | "other";
+
+/** An entry in the knowledge base that models are allowed to read. */
+export type KnowledgeEntry = {
+  id: string;
+  category: KnowledgeCategory;
+  title: string;
+  content: string;
+  approved: boolean;
+  tags: string[];
+  source?: string;
+  updated_at?: string;
+};
+
 export type Template = {
   id: string;
   name: string;

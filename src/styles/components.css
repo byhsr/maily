@@ -1582,7 +1582,7 @@ button svg {
 }
 
 .modelpick input {
-  font-family: var(--mono);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
 }
 
@@ -1594,6 +1594,94 @@ button svg {
 .drawerform > label > small {
   color: var(--ink-3);
   font-size: 11px;
+}
+
+.knowrows {
+  display: flex;
+  flex-direction: column;
+}
+
+.knowrows button {
+  display: grid;
+  grid-template-columns: 10px 1.8fr 1fr auto;
+  gap: 13px;
+  align-items: center;
+  padding: 12px 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.knowrows button:hover {
+  background: var(--surface-2);
+}
+
+.knowrows b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowrows small {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.knowrows em {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.knowmark {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line);
+}
+
+.knowmark.on {
+  background: var(--ink);
+}
+
+.knowtoggle {
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.knowtoggle input {
+  margin-top: 3px;
+  accent-color: var(--ink);
+}
+
+.knowtoggle b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowtoggle small {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.promptpreview {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
 }
 
 .notice {
