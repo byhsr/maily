@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Mail, Play, Plus } from "lucide-react";
+import { ArrowLeft, Mail, Play, Plus } from "lucide-react";
 import {
   Background,
   BackgroundVariant,
@@ -52,9 +52,10 @@ type CampaignCanvasProps = {
   tell: (message: string) => void;
   onSelect: (campaignId?: string) => void;
   reload: () => void;
+  onBack: () => void;
 };
 
-export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads, tell, onSelect, reload }: CampaignCanvasProps) {
+export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads, tell, onSelect, reload, onBack }: CampaignCanvasProps) {
   const [campaignId, setCampaignId] = useState(initialCampaignId ?? "");
   const [creating, setCreating] = useState(!initialCampaignId);
   const [draftName, setDraftName] = useState("");
@@ -268,6 +269,9 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
   return (
     <section className="canvaspage" style={canvasVars()}>
       <div className="cv-topbar">
+        <button className="cv-back" onClick={onBack} title="Back to campaigns" aria-label="Back to campaigns">
+          <ArrowLeft />
+        </button>
         <span className="cv-logo">
           <i>
             <Mail />

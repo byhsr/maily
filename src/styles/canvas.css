@@ -42,6 +42,28 @@
   box-shadow: 0 12px 30px rgb(0 0 0 / 0.5);
 }
 
+.cv-back {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  justify-content: center;
+  border: 1px solid var(--cv-card-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--cv-ink-2);
+}
+
+.cv-back:hover {
+  border-color: var(--cv-card-line-hover);
+  color: var(--cv-ink);
+}
+
+.cv-back svg {
+  width: 15px;
+  height: 15px;
+}
+
 .cv-logo {
   display: inline-flex;
   align-items: center;

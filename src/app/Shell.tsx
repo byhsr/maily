@@ -207,6 +207,7 @@ export function Shell() {
               tell={tell}
               onSelect={setCanvasId}
               reload={load}
+              onBack={() => setPage("Campaigns")}
             />
           )}
         </main>
