@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Mail, Play, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Mail, Play, Plus } from "lucide-react";
 import {
   Background,
   BackgroundVariant,
   Controls,
-  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   addEdge,
@@ -19,7 +18,6 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
-  deleteCampaign,
   launchCampaign,
   loadCampaignGraph,
   pauseCampaign,
@@ -88,11 +86,11 @@ function FlowSurface({ nodes, edges, onNodesChange, onEdgesChange, onConnect, on
         onConnect={onConnect}
         onNodeClick={(_, node) => onSelectNode(node.id)}
         onPaneClick={() => onSelectNode(undefined)}
+        proOptions={{ hideAttribution: true }}
         fitView
       >
         <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color={theme.canvas.dot} />
-        <MiniMap pannable zoomable maskColor="rgba(11,11,12,0.72)" />
-        <Controls showInteractive={false} />
+        <Controls showInteractive={false} position="bottom-left" />
       </ReactFlow>
     </div>
   );
@@ -117,7 +115,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const [issues, setIssues] = useState<string[]>([]);
   const [selected, setSelected] = useState<string>();
   const [running, setRunning] = useState(false);
-  const [confirming, setConfirming] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   const refresh = useCallback(
     async (id: string) => {
@@ -185,20 +183,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
       onSelect(created);
       reload();
       tell("Campaign created — add your first node");
-    } catch (e) {
-      tell(String(e));
-    }
-  };
-
-  const removeCampaign = async () => {
-    try {
-      await deleteCampaign(campaignId);
-      setConfirming(false);
-      setCampaignId("");
-      onSelect(undefined);
-      reload();
-      onBack();
-      tell("Campaign deleted");
     } catch (e) {
       tell(String(e));
     }
@@ -328,24 +312,29 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
           maily
         </span>
         <span className="cv-divider" />
-        <div className="cv-nodes">
-          {PALETTE.map((type) => (
-            <button
-              className="cv-node-add"
-              key={type}
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData(DRAG_TYPE, type);
-                e.dataTransfer.effectAllowed = "copy";
-              }}
-              onClick={() => addNode(type)}
-              title={`Drag ${NODE_META[type].label} onto the canvas, or click to add`}
-            >
-              <i className="cv-dot" style={{ background: nodeAccent(type) }} />
-              {NODE_META[type].label}
-            </button>
-          ))}
-        </div>
+        <button className={paletteOpen ? "cv-pill on" : "cv-pill"} onClick={() => setPaletteOpen((open) => !open)}>
+          Nodes
+        </button>
+        {paletteOpen && (
+          <div className="cv-nodes">
+            {PALETTE.map((type) => (
+              <button
+                className="cv-node-add"
+                key={type}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData(DRAG_TYPE, type);
+                  e.dataTransfer.effectAllowed = "copy";
+                }}
+                onClick={() => addNode(type)}
+                title={`Drag ${NODE_META[type].label} onto the canvas, or click to add`}
+              >
+                <i className="cv-dot" style={{ background: nodeAccent(type) }} />
+                {NODE_META[type].label}
+              </button>
+            ))}
+          </div>
+        )}
         <span className="cv-spacer" />
         {creating ? (
           <>
@@ -395,10 +384,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
             <button className="cv-pill" onClick={runValidate}>
               Validate
             </button>
-            <button className="cv-pill" onClick={() => setConfirming(true)}>
-              <Trash2 />
-              Delete
-            </button>
             {running ? (
               <button className="cv-run" onClick={runPause}>
                 Pause
@@ -436,7 +421,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
               onDropNode={addNodeAt}
             />
           </ReactFlowProvider>
-          <div className="cv-panel">
+          <div className="cv-side">
             <Inspector
               node={selectedNode}
               templates={templates}
@@ -458,27 +443,10 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
       ) : (
         <div className="cv-wrap">
           <div className="cv-flow" />
-          <div className="cv-panel">
-            <h4>Get started</h4>
-            <p>Name a campaign in the bar above, then drag nodes from the palette onto the canvas.</p>
-          </div>
-        </div>
-      )}
-
-      {confirming && (
-        <div className="cv-confirm" onMouseDown={() => setConfirming(false)}>
-          <div className="cv-confirm-card" onMouseDown={(e) => e.stopPropagation()}>
-            <h3>Delete this campaign?</h3>
-            <p>
-              The sequence, its enrolled leads and any pending sends are removed. This cannot be undone.
-            </p>
-            <div className="cv-confirm-actions">
-              <button className="cv-pill" onClick={() => setConfirming(false)}>
-                Cancel
-              </button>
-              <button className="cv-run danger" onClick={removeCampaign}>
-                Delete campaign
-              </button>
+          <div className="cv-side">
+            <div className="cv-panel">
+              <h4>Get started</h4>
+              <p>Name a campaign in the bar above, then drag nodes from the palette onto the canvas.</p>
             </div>
           </div>
         </div>

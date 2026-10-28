@@ -8,10 +8,8 @@
   position: relative;
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  overflow: hidden;
   margin: -20px -34px -28px;
-  padding: 18px 22px 22px;
   background: var(--cv-bg, #0b0b0c);
   color: var(--cv-ink, #ededf0);
 }
@@ -27,13 +25,15 @@
 
 /* ---------- Floating top bar ---------- */
 .cv-topbar {
-  position: relative;
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  right: 14px;
   z-index: 5;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--cv-card-line);
   border-radius: 22px;
@@ -87,55 +87,7 @@
   cursor: grabbing;
 }
 
-/* Destructive confirmation, scoped to the workspace like the drawers. */
-.cv-confirm {
-  position: fixed;
-  inset: var(--titlebar-h) 0 0 0;
-  z-index: 60;
-  display: grid;
-  place-items: center;
-  background: rgb(0 0 0 / 0.55);
-}
-
-.cv-confirm-card {
-  width: min(400px, calc(100% - 40px));
-  padding: 20px;
-  border: 1px solid var(--cv-card-line);
-  border-radius: 14px;
-  background: #17171a;
-  box-shadow: 0 24px 60px rgb(0 0 0 / 0.6);
-}
-
-.cv-confirm-card h3 {
-  margin: 0 0 8px;
-  color: var(--cv-ink);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.cv-confirm-card p {
-  margin: 0 0 18px;
-  color: var(--cv-ink-2);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.cv-confirm-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.cv-run.danger {
-  background: #ff6b6b;
-  color: #1a1a1c;
-}
-
-.cv-pill:hover.cv-danger,
-.cv-pill.danger:hover {
-  border-color: #ff6b6b;
-  color: #ff8b8b;
-}
+/* Destructive confirmation lives on the campaign card; see styles/components.css. */
 
 .cv-back {
   flex: none;
@@ -256,28 +208,31 @@
 .cv-pill-badge.tone-gray { background: #3a3a40; color: #ededf0; }
 
 /* ---------- Flow surface ---------- */
+/* The canvas is the whole page: chrome floats over it instead of framing it. */
 .cv-wrap {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: 1fr 260px;
-  gap: 12px;
-  align-items: stretch;
-  flex: 1;
-  min-height: 0;
-  margin-top: 14px;
+  position: absolute;
+  inset: 0;
 }
 
 .cv-flow {
-  position: relative;
-  z-index: 1;
-  flex: 1;
-  min-height: 460px;
-  margin-top: 14px;
-  border: 1px solid var(--cv-card-line);
-  border-radius: 16px;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
   background: var(--cv-bg);
+}
+
+/* Floating inspector column, pinned to the right edge. */
+.cv-side {
+  position: absolute;
+  top: 76px;
+  right: 14px;
+  bottom: 14px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 264px;
+  overflow: auto;
 }
 
 .canvaspage .react-flow__node {
@@ -698,7 +653,7 @@ textarea.cv-inset {
     padding: 14px;
   }
 
-  .cv-wrap {
-    grid-template-columns: 1fr;
+  .cv-side {
+    display: none;
   }
 }

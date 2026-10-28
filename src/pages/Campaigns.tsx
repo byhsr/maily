@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import type { Campaign } from "../lib/types";
 import { Button } from "../ui/Button";
 import { CampaignCard } from "../ui/CampaignCard";
+import { Confirm } from "../ui/Confirm";
 import { EmptyState } from "../ui/EmptyState";
 import { FilterChip } from "../ui/FilterChip";
 import { Topbar } from "../ui/Topbar";
@@ -16,12 +17,15 @@ type CampaignsProps = {
   favourites: string[];
   onToggleFavourite: (id: string) => void;
   onOpenCanvas: (campaign: Campaign) => void;
+  onDelete: (id: string) => Promise<void>;
+  tell: (message: string) => void;
 };
 
-export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCanvas }: CampaignsProps) {
+export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCanvas, onDelete, tell }: CampaignsProps) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("All");
   const [range, setRange] = useState("Any time");
+  const [pending, setPending] = useState<Campaign>();
 
   const q = query.trim().toLowerCase();
   const days = range === "This week" ? 7 : range === "This month" ? 30 : 0;
@@ -67,6 +71,7 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
               favourite={favourites.includes(campaign.id)}
               onToggleFavourite={() => onToggleFavourite(campaign.id)}
               onOpen={() => onOpenCanvas(campaign)}
+              onDelete={() => setPending(campaign)}
             />
           ))}
         </div>
@@ -74,6 +79,21 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
         <p className="muted">No campaigns match these filters.</p>
       ) : (
         <EmptyState text="No campaign sequences yet." action={onNew} />
+      )}
+
+      {pending && (
+        <Confirm
+          title="Delete campaign?"
+          message={`“${pending.name}” and its sequence, enrolled leads and pending sends are removed. This cannot be undone.`}
+          onCancel={() => setPending(undefined)}
+          onConfirm={() => {
+            const target = pending;
+            setPending(undefined);
+            onDelete(target.id)
+              .then(() => tell("Campaign deleted"))
+              .catch((e) => tell(String(e)));
+          }}
+        />
       )}
     </section>
   );

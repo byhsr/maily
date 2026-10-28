@@ -1,4 +1,5 @@
 import { Mail, Mailbox, MoreVertical, Star } from "lucide-react";
+import { useState } from "react";
 import type { Campaign } from "../lib/types";
 
 const relTime = (iso?: string) => {
@@ -25,9 +26,11 @@ type CampaignCardProps = {
   favourite: boolean;
   onToggleFavourite: () => void;
   onOpen: () => void;
+  onDelete: () => void;
 };
 
-export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen }: CampaignCardProps) {
+export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDelete }: CampaignCardProps) {
+  const [menu, setMenu] = useState(false);
   const active = campaign.status === "active";
   const when = relTime(campaign.approved_at);
   const avatars = initials(campaign.name);
@@ -43,9 +46,35 @@ export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen }:
         >
           <Star fill={favourite ? "currentColor" : "none"} />
         </button>
-        <button className="kebab" onClick={onOpen} aria-label="Open campaign canvas" title="Open campaign">
-          <MoreVertical />
-        </button>
+        <div className="kebabwrap">
+          <button className="kebab" onClick={() => setMenu((open) => !open)} aria-label="Campaign actions" title="More">
+            <MoreVertical />
+          </button>
+          {menu && (
+            <>
+              <div className="menuscrim" onClick={() => setMenu(false)} />
+              <div className="cardmenu" role="menu">
+                <button
+                  onClick={() => {
+                    setMenu(false);
+                    onOpen();
+                  }}
+                >
+                  Open campaign
+                </button>
+                <button
+                  className="danger"
+                  onClick={() => {
+                    setMenu(false);
+                    onDelete();
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
       <button className="cardbody" onClick={onOpen}>
         <span className="meta">

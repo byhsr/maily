@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { listCampaigns, listChannels, listLeads, listTemplates } from "../lib/api";
+import { deleteCampaign, listCampaigns, listChannels, listLeads, listTemplates } from "../lib/api";
 import type { Campaign, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
@@ -147,6 +147,12 @@ export function Shell() {
     setPage("Canvas");
   };
 
+  const removeCampaign = async (id: string) => {
+    await deleteCampaign(id);
+    if (canvasId === id) setCanvasId(undefined);
+    await load();
+  };
+
   const favouriteCampaigns = campaigns.filter((c) => favourites.includes(c.id));
 
   return (
@@ -181,6 +187,8 @@ export function Shell() {
               favourites={favourites}
               onToggleFavourite={toggleFavourite}
               onOpenCanvas={openCampaign}
+              onDelete={removeCampaign}
+              tell={tell}
             />
           )}
           {page === "Leads" && <Leads leads={leads} open={setDrawer} reload={load} tell={tell} />}
