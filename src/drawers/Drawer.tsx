@@ -3,11 +3,10 @@ import { motion } from "motion/react";
 import type { ReactNode } from "react";
 
 const TITLES: Record<string, string> = {
-  campaign: "Campaign & sequence editor",
-  template: "Template editor",
+  template: "Template",
   settings: "Settings",
-  agent: "Run an agent",
-  lead: "Lead details",
+  agent: "Agent",
+  lead: "Lead",
 };
 
 type DrawerProps = {
@@ -20,7 +19,7 @@ export function Drawer({ kind, close, children }: DrawerProps) {
   return (
     <motion.div className="veil" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={close}>
       <motion.aside
-        className={`drawer ${kind === "campaign" || kind === "template" ? "drawerwide" : ""}`}
+        className={`drawer ${kind === "template" ? "drawerwide" : ""}`}
         initial={{ x: "100%" }}
         animate={{ x: 0 }}
         exit={{ x: "100%" }}
@@ -28,11 +27,8 @@ export function Drawer({ kind, close, children }: DrawerProps) {
         onMouseDown={(e) => e.stopPropagation()}
       >
         <header>
-          <div>
-            <label>{kind.toUpperCase()}</label>
-            <h2>{TITLES[kind]}</h2>
-          </div>
-          <button className="round" onClick={close}>
+          <h2>{TITLES[kind]}</h2>
+          <button className="round" onClick={close} aria-label="Close">
             <X />
           </button>
         </header>

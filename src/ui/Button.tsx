@@ -4,7 +4,7 @@ export type ButtonVariant = "primary" | "ghost" | "ink" | "icon";
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
   primary: "lime",
-  ghost: "",
+  ghost: "ghost",
   ink: "ink",
   icon: "round",
 };

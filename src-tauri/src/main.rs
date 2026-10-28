@@ -1920,14 +1920,182 @@ async fn scheduler(st: AppState) {
         }
     }
 }
+/// tao currently gives top-level windows `WS_CAPTION` even when decorations are
+/// disabled (tauri-apps/tao#1106), so the native title/control bar stays visible.
+/// Strip the frame styles once the window exists; `WS_THICKFRAME` is kept so the
+/// window can still be resized.
+#[cfg(windows)]
+fn strip_native_frame(window: &tauri::WebviewWindow) {
+    use std::ffi::c_void;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetWindowLongPtrW(hwnd: *mut c_void, index: i32) -> isize;
+        fn SetWindowLongPtrW(hwnd: *mut c_void, index: i32, value: isize) -> isize;
+        fn SetWindowPos(hwnd: *mut c_void, after: *mut c_void, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    }
+
+    const GWL_STYLE: i32 = -16;
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_BORDER: isize = 0x0080_0000;
+    const WS_DLGFRAME: isize = 0x0040_0000;
+    const WS_EX_DLGMODALFRAME: isize = 0x0000_0001;
+    const WS_EX_WINDOWEDGE: isize = 0x0000_0100;
+    const WS_EX_CLIENTEDGE: isize = 0x0000_0200;
+    const WS_EX_STATICEDGE: isize = 0x0002_0000;
+    const SWP_NOSIZE: u32 = 0x0001;
+    const SWP_NOMOVE: u32 = 0x0002;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+
+    let Ok(handle) = window.hwnd() else {
+        return;
+    };
+    let hwnd = handle.0 as *mut c_void;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        // Guard the re-application (see `watch_native_frame`): when the caption
+        // bits are already gone there is nothing to do, so this cannot loop.
+        if style & (WS_BORDER | WS_DLGFRAME) == 0 {
+            return;
+        }
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(WS_BORDER | WS_DLGFRAME));
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ex & !(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE),
+        );
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// tao re-applies `WS_CAPTION` on later window operations (showing/focusing the
+/// window runs `SetWindowPos`, which reintroduces it). Re-strip whenever the
+/// window changes; `strip_native_frame` is a no-op once the frame is gone.
+#[cfg(windows)]
+fn watch_native_frame(window: &tauri::WebviewWindow) {
+    strip_native_frame(window);
+    let handle = window.clone();
+    window.on_window_event(move |_| strip_native_frame(&handle));
+}
+
+/// Neither the configured size nor the OS default placement accounts for the
+/// taskbar: `center: true` centers on the full monitor and a 820px-tall window
+/// overflows a 768px display. Fit the window into the monitor's work area
+/// (`rcWork`, which excludes the taskbar) and center it there.
+#[cfg(windows)]
+fn fit_to_work_area(window: &tauri::WebviewWindow) {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct MonitorInfo {
+        cb_size: u32,
+        rc_monitor: Rect,
+        rc_work: Rect,
+        flags: u32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MonitorFromWindow(hwnd: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
+        fn GetWindowRect(hwnd: *mut c_void, rect: *mut Rect) -> i32;
+        fn IsZoomed(hwnd: *mut c_void) -> i32;
+        fn SetWindowPos(hwnd: *mut c_void, after: *mut c_void, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+    }
+
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+
+    let Ok(handle) = window.hwnd() else {
+        return;
+    };
+    let hwnd = handle.0 as *mut c_void;
+    unsafe {
+        // A maximized window is already at the work-area size; moving it would
+        // just look like an un-maximize on launch.
+        if IsZoomed(hwnd) != 0 {
+            return;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return;
+        }
+        let mut info = MonitorInfo {
+            cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return;
+        }
+        let mut rect = Rect::default();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return;
+        }
+
+        let work_w = info.rc_work.right - info.rc_work.left;
+        let work_h = info.rc_work.bottom - info.rc_work.top;
+        let win_w = rect.right - rect.left;
+        let win_h = rect.bottom - rect.top;
+        if work_w <= 0 || work_h <= 0 {
+            return;
+        }
+
+        let width = win_w.min(work_w);
+        let height = win_h.min(work_h);
+        let x = info.rc_work.left + (work_w - width) / 2;
+        let y = info.rc_work.top + (work_h - height) / 2;
+        if width == win_w && height == win_h && x == rect.left && y == rect.top {
+            return;
+        }
+        SetWindowPos(hwnd, std::ptr::null_mut(), x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let dir = tauri::path::BaseDirectory::AppData;
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Window chrome is owned by the config (decorations: false), so the state
+        // plugin must not restore a stale `decorated` value over it, nor restore
+        // a maximized frame that would sit over the taskbar.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::DECORATIONS
+                        - tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .setup(move |app| {
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                watch_native_frame(&window);
+                fit_to_work_area(&window);
+            }
             let path = app
                 .path()
                 .resolve("maily.sqlite", dir)

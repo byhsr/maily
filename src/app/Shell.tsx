@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { listCampaigns, listLeads, listTemplates } from "../lib/api";
+import { listCampaigns, listChannels, listLeads, listTemplates } from "../lib/api";
 import type { Campaign, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
@@ -11,13 +11,13 @@ import { Templates } from "../pages/Templates";
 import { Agents } from "../pages/Agents";
 import { CampaignCanvas } from "../canvas/Canvas";
 import { Drawer } from "../drawers/Drawer";
-import { CampaignDrawer } from "../drawers/CampaignDrawer";
 import { TemplateDrawer } from "../drawers/TemplateDrawer";
 import { LeadDrawer } from "../drawers/LeadDrawer";
 import { AgentDrawer } from "../drawers/AgentDrawer";
 import { SettingsDrawer } from "../drawers/SettingsDrawer";
-import { CommandBar } from "../ui/CommandBar";
-import { Rail } from "./Rail";
+import { Sidebar } from "./Sidebar";
+import { Titlebar } from "./Titlebar";
+import { NavContext } from "./nav";
 
 function readFavourites(): string[] {
   try {
@@ -28,6 +28,18 @@ function readFavourites(): string[] {
   }
 }
 
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem("mailySidebar") === "collapsed";
+  } catch {
+    return false;
+  }
+}
+
+function isNarrow() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
 export function Shell() {
   const [page, setPage] = useState("Home");
   const [drawer, setDrawer] = useState<string | undefined>();
@@ -36,10 +48,13 @@ export function Shell() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [note, setNote] = useState("");
-  const [query, setQuery] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
   const [canvasId, setCanvasId] = useState<string | undefined>();
+  const [unread, setUnread] = useState(0);
+  const [collapsed, setCollapsed] = useState(readCollapsed);
+  const [mobile, setMobile] = useState(isNarrow);
+  const [navOpen, setNavOpen] = useState(false);
 
   const tell = (message: string) => {
     setNote(message);
@@ -55,6 +70,12 @@ export function Shell() {
     } catch (e) {
       tell(String(e));
     }
+    try {
+      const channels = await listChannels();
+      setUnread(channels.reduce((sum, channel) => sum + channel.unread, 0));
+    } catch {
+      /* notifications are best-effort */
+    }
   };
 
   useEffect(() => {
@@ -65,6 +86,43 @@ export function Shell() {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     localStorage.mailyTheme = dark ? "dark" : "light";
   }, [dark]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("mailySidebar", collapsed ? "collapsed" : "open");
+    } catch {
+      /* storage may be unavailable */
+    }
+  }, [collapsed]);
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 900px)");
+    const onChange = () => {
+      setMobile(query.matches);
+      if (!query.matches) setNavOpen(false);
+    };
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    if (mobile) setNavOpen((open) => !open);
+    else setCollapsed((value) => !value);
+  }, [mobile]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        if (mobile) setNavOpen((open) => !open);
+        else setCollapsed((value) => !value);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobile]);
+
+  const nav = useMemo(() => ({ mobile, openNav: () => setNavOpen(true) }), [mobile]);
 
   const toggleFavourite = (id: string) => {
     setFavourites((prev) => {
@@ -78,78 +136,100 @@ export function Shell() {
     setDrawer(undefined);
     setEditingTemplate(undefined);
   };
-  const openCampaign = () => setDrawer("campaign");
-  const openLead = () => setDrawer("lead");
 
-  const q = query.trim().toLowerCase();
-  const visibleCampaigns = campaigns.filter((c) => !q || c.name.toLowerCase().includes(q));
-  const visibleLeads = leads.filter(
-    (l) => !q || l.email.toLowerCase().includes(q) || (l.first_name || "").toLowerCase().includes(q) || (l.company || "").toLowerCase().includes(q)
-  );
+  const openCampaign = (campaign: Campaign) => {
+    setCanvasId(campaign.id);
+    setPage("Canvas");
+  };
+
+  const startNewCampaign = () => {
+    setCanvasId(undefined);
+    setPage("Canvas");
+  };
+
   const favouriteCampaigns = campaigns.filter((c) => favourites.includes(c.id));
 
   return (
-    <div className="newapp">
-      <Rail
-        page={page}
-        onNavigate={setPage}
-        onOpenSettings={() => setDrawer("settings")}
-        favourites={favouriteCampaigns}
-        onOpenFavourites={() => setPage("Campaigns")}
-      />
-      <main className="workspace">
-        {page === "Home" && <Home campaigns={visibleCampaigns} open={setDrawer} />}
-        {page === "Campaigns" && (
-          <Campaigns
-            campaigns={visibleCampaigns}
-            open={setDrawer}
-            favourites={favourites}
-            onToggleFavourite={toggleFavourite}
-            onOpenCanvas={(c) => {
-              setCanvasId(c.id);
-              setPage("Canvas");
-            }}
-          />
-        )}
-        {page === "Leads" && <Leads leads={visibleLeads} open={setDrawer} reload={load} tell={tell} />}
-        {page === "Inbox" && <Inbox tell={tell} />}
-        {page === "Templates" && (
-          <Templates
-            templates={templates}
-            open={setDrawer}
-            onEdit={(t) => {
-              setEditingTemplate(t);
-              setDrawer("template");
-            }}
-            reload={load}
-            tell={tell}
-          />
-        )}
-        {page === "Agents" && <Agents open={setDrawer} />}
-        {page === "Canvas" && (
-          <CampaignCanvas campaigns={campaigns} initialCampaignId={canvasId} templates={templates} leads={leads} tell={tell} />
-        )}
-      </main>
-      <CommandBar value={query} onChange={setQuery} onNewCampaign={openCampaign} onAddLead={openLead} />
-      <AnimatePresence>
-        {drawer && (
-          <Drawer kind={drawer} close={closeDrawer}>
-            {drawer === "campaign" && <CampaignDrawer templates={templates} close={closeDrawer} reload={load} tell={tell} />}
-            {drawer === "template" && (
-              <TemplateDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} template={editingTemplate} />
-            )}
-            {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
-            {drawer === "agent" && <AgentDrawer tell={tell} />}
-            {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} />}
-          </Drawer>
-        )}
-      </AnimatePresence>
-      {note && (
-        <div className="notice">
-          <Check />
-          {note}
+    <NavContext.Provider value={nav}>
+      <div className="desktop">
+        <Titlebar collapsed={collapsed && !mobile} onToggle={toggleSidebar} />
+        <div className="app">
+        <Sidebar
+          page={page}
+          onNavigate={setPage}
+          onOpenSettings={() => setDrawer("settings")}
+          favourites={favouriteCampaigns}
+          onOpenFavourites={() => setPage("Campaigns")}
+          campaigns={campaigns}
+          onOpenCampaign={openCampaign}
+          activeCampaignId={page === "Canvas" ? canvasId : undefined}
+          collapsed={collapsed}
+          mobile={mobile}
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          notifications={unread}
+        />
+        {mobile && navOpen && <div className="app-scrim" onClick={() => setNavOpen(false)} />}
+        <main className="app-main">
+          {page === "Home" && (
+            <Home campaigns={campaigns} open={setDrawer} onNewCampaign={startNewCampaign} onOpenCampaign={openCampaign} />
+          )}
+          {page === "Campaigns" && (
+            <Campaigns
+              campaigns={campaigns}
+              onNew={startNewCampaign}
+              favourites={favourites}
+              onToggleFavourite={toggleFavourite}
+              onOpenCanvas={openCampaign}
+            />
+          )}
+          {page === "Leads" && <Leads leads={leads} open={setDrawer} reload={load} tell={tell} />}
+          {page === "Inbox" && <Inbox tell={tell} />}
+          {page === "Templates" && (
+            <Templates
+              templates={templates}
+              open={setDrawer}
+              onEdit={(t) => {
+                setEditingTemplate(t);
+                setDrawer("template");
+              }}
+              reload={load}
+              tell={tell}
+            />
+          )}
+          {page === "Agents" && <Agents open={setDrawer} />}
+          {page === "Canvas" && (
+            <CampaignCanvas
+              campaigns={campaigns}
+              initialCampaignId={canvasId}
+              templates={templates}
+              leads={leads}
+              tell={tell}
+              onSelect={setCanvasId}
+              reload={load}
+            />
+          )}
+        </main>
         </div>
-      )}
-    </div>
+        <AnimatePresence>
+          {drawer && (
+            <Drawer kind={drawer} close={closeDrawer}>
+              {drawer === "template" && (
+                <TemplateDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} template={editingTemplate} />
+              )}
+              {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
+              {drawer === "agent" && <AgentDrawer tell={tell} />}
+              {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} />}
+            </Drawer>
+          )}
+        </AnimatePresence>
+        {note && (
+          <div className="notice">
+            <Check />
+            {note}
+          </div>
+        )}
+      </div>
+    </NavContext.Provider>
   );
 }

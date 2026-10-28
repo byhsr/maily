@@ -12,17 +12,17 @@ type InspectorProps = {
 export function Inspector({ node, templates, onChange, onDelete }: InspectorProps) {
   if (!node) {
     return (
-      <aside className="inspector">
-        <span className="raillabel">Inspector</span>
-        <p className="muted">Select a node to configure it.</p>
-      </aside>
+      <div className="cv-panel">
+        <h4>Inspector</h4>
+        <p>Select a node to configure it.</p>
+      </div>
     );
   }
   const { nodeType, config, label } = node.data;
 
   return (
-    <aside className="inspector">
-      <span className="raillabel">Inspector · {label}</span>
+    <div className="cv-panel">
+      <h4>Inspector · {label}</h4>
       {nodeType === "email" && (
         <label>
           Template
@@ -89,12 +89,12 @@ export function Inspector({ node, templates, onChange, onDelete }: InspectorProp
           </select>
         </label>
       )}
-      {nodeType === "start" && <p className="muted">Leads enter here and move down the graph.</p>}
+      {nodeType === "start" && <p>Leads enter here and move down the graph.</p>}
       {nodeType !== "start" && (
-        <button className="chip" onClick={onDelete}>
+        <button className="cv-danger" onClick={onDelete}>
           Delete node
         </button>
       )}
-    </aside>
+    </div>
   );
 }

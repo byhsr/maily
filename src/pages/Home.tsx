@@ -9,19 +9,22 @@ import { FilterChip } from "../ui/FilterChip";
 import { HeroNumber } from "../ui/HeroNumber";
 import { LineChart } from "../ui/LineChart";
 import { Stat } from "../ui/Stat";
+import { Topbar } from "../ui/Topbar";
 
 const RANGES = ["Week", "Month", "Year"];
 
 type HomeProps = {
   campaigns: Campaign[];
   open: (kind: string) => void;
+  onNewCampaign: () => void;
+  onOpenCampaign: (campaign: Campaign) => void;
 };
 
 const pct = (part: number, whole: number) => (whole > 0 ? Math.round((part / whole) * 100) : 0);
 const delta = (now: number, before: number) =>
   before > 0 ? Math.round(((now - before) / before) * 100) : now > 0 ? 100 : 0;
 
-export function Home({ campaigns, open }: HomeProps) {
+export function Home({ campaigns, open, onNewCampaign, onOpenCampaign }: HomeProps) {
   const [range, setRange] = useState("Week");
   const [stats, setStats] = useState<DashboardStats | null>(null);
 
@@ -60,6 +63,11 @@ export function Home({ campaigns, open }: HomeProps) {
 
   return (
     <>
+      <Topbar
+        status={stats ? `${totals.sent} sent` : "Local"}
+        action={<Button onClick={onNewCampaign}>New</Button>}
+      />
+
       <div className="hero">
         <div>
           <label>REPLIES THIS {range.toUpperCase()}</label>
@@ -93,7 +101,7 @@ export function Home({ campaigns, open }: HomeProps) {
               <h3>{stats?.needsAttention ?? 0} replies waiting</h3>
             </div>
             <Button variant="ghost" onClick={() => open("lead")}>
-              Open pipeline <ChevronRight />
+              Open <ChevronRight />
             </Button>
           </header>
           <p className="muted">
@@ -108,8 +116,8 @@ export function Home({ campaigns, open }: HomeProps) {
               <label>ACTIVE CAMPAIGNS</label>
               <h3>{stats?.activeCampaigns ?? 0} running</h3>
             </div>
-            <Button variant="ghost" onClick={() => open("campaign")}>
-              New campaign <ChevronRight />
+            <Button variant="ghost" onClick={onNewCampaign}>
+              New <ChevronRight />
             </Button>
           </header>
           {activeCampaigns.length ? (
@@ -121,7 +129,7 @@ export function Home({ campaigns, open }: HomeProps) {
                   </span>
                   <small>{c.leads} leads · {c.mode}</small>
                   <Badge>{c.status}</Badge>
-                  <Button variant="ghost" onClick={() => open("campaign")}>
+                  <Button variant="ghost" onClick={() => onOpenCampaign(c)}>
                     Edit <ChevronRight />
                   </Button>
                 </div>

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Plus } from "lucide-react";
 import * as XLSX from "xlsx";
 import { upsertLeads } from "../lib/api";
@@ -6,6 +7,7 @@ import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
 import { Input } from "../ui/Input";
+import { Topbar } from "../ui/Topbar";
 
 type LeadsProps = {
   leads: Lead[];
@@ -15,6 +17,8 @@ type LeadsProps = {
 };
 
 export function Leads({ leads, open, reload, tell }: LeadsProps) {
+  const [query, setQuery] = useState("");
+
   const importFile = async (file: File) => {
     try {
       const raw = await file.arrayBuffer();
@@ -43,40 +47,58 @@ export function Leads({ leads, open, reload, tell }: LeadsProps) {
       tell(`Could not import file: ${String(e)}`);
     }
   };
+
+  const q = query.trim().toLowerCase();
+  const shown = leads.filter(
+    (l) =>
+      !q ||
+      l.email.toLowerCase().includes(q) ||
+      (l.first_name || "").toLowerCase().includes(q) ||
+      (l.company || "").toLowerCase().includes(q)
+  );
+
   return (
-    <section className="sheet">
-      <header>
-        <div>
-          <label>PEOPLE</label>
-          <h2>Lead pipeline</h2>
-        </div>
-        <div className="actions">
-          <label className="round">
-            Import CSV / XLSX
-            <Input type="file" hidden accept=".csv,.xlsx,.xls" onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
-          </label>
+    <>
+      <Topbar
+        search={{ value: query, onChange: setQuery, placeholder: "Search leads..." }}
+        status={`${leads.length} lead${leads.length === 1 ? "" : "s"}`}
+        action={
           <Button onClick={() => open("lead")}>
-            <Plus />Add lead
+            <Plus />Add
           </Button>
-        </div>
-      </header>
-      {leads.length ? (
-        <div className="leadrows">
-          {leads.map((l) => (
-            <button onClick={() => open("lead")} key={l.id}>
-              <b>{(l.first_name || l.email)[0]}</b>
-              <span>
-                {l.first_name || l.email}
-                <small>{l.company || "Needs enrichment"}</small>
-              </span>
-              <em>{l.title || "Research pending"}</em>
-              <Badge>{l.status}</Badge>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <EmptyState text="Import a CSV/XLSX or add one prospect to begin." action={() => open("lead")} />
-      )}
-    </section>
+        }
+      />
+
+      <section className="sheet">
+        <header>
+          <h2>Leads</h2>
+          <div className="actions">
+            <label className="round">
+              Import
+              <Input type="file" hidden accept=".csv,.xlsx,.xls" onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
+            </label>
+          </div>
+        </header>
+        {shown.length ? (
+          <div className="leadrows">
+            {shown.map((l) => (
+              <button onClick={() => open("lead")} key={l.id}>
+                <b>{(l.first_name || l.email)[0]}</b>
+                <span>
+                  {l.first_name || l.email}
+                  <small>{l.company || "Needs enrichment"}</small>
+                </span>
+                <em>{l.title || "Research pending"}</em>
+                <Badge>{l.status}</Badge>
+              </button>
+            ))}
+          </div>
+        ) : leads.length ? (
+          <p className="muted">No leads match this search.</p>
+        ) : (
+          <EmptyState text="Import a CSV/XLSX or add one prospect to begin." action={() => open("lead")} />
+        )}
+      </section>
+    </>
   );
 }

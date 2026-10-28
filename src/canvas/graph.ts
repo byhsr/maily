@@ -3,6 +3,9 @@ import type { EdgeLabel, GraphEdge, GraphNode, NodeType, Template } from "../lib
 
 export type CampaignNodeData = {
   nodeType: NodeType;
+  /** Muted type label shown above the card ("Email", "Model"). */
+  kind: string;
+  /** Instance title inside the card ("Email 1"). */
   label: string;
   summary: string;
   count: number;
@@ -156,6 +159,7 @@ export function toFlow(
     position: { x: node.x, y: node.y },
     data: {
       nodeType: node.type,
+      kind: NODE_META[node.type].label,
       label: NODE_META[node.type].label,
       summary: summarize(node.type, node.config, templates),
       count: counts[node.id] ?? 0,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Inbox as InboxIcon, RefreshCw, Sparkles } from "lucide-react";
 import {
   classifyInbox,
@@ -14,6 +14,7 @@ import {
 import type { Channel, InboxMessage, InboxThread } from "../lib/types";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
+import { Topbar } from "../ui/Topbar";
 
 type InboxProps = {
   tell: (message: string) => void;
@@ -34,6 +35,17 @@ export function Inbox({ tell }: InboxProps) {
   const [thread, setThread] = useState<InboxThread | null>(null);
   const [picked, setPicked] = useState<string[]>([]);
   const [index, setIndex] = useState(0);
+  const [query, setQuery] = useState("");
+
+  const q = query.trim().toLowerCase();
+  const shown = useMemo(
+    () =>
+      messages.filter(
+        (m) => !q || (m.subject || "").toLowerCase().includes(q) || (m.from_email || "").toLowerCase().includes(q)
+      ),
+    [messages, q]
+  );
+  const unread = channels.reduce((sum, c) => sum + c.unread, 0);
 
   const loadChannels = useCallback(async () => setChannels(await listChannels()), []);
   const loadMessages = useCallback(async () => setMessages(await listInbox(channel, unreadOnly)), [channel, unreadOnly]);
@@ -61,13 +73,13 @@ export function Inbox({ tell }: InboxProps) {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (e.key === "j") {
-        const next = Math.min(index + 1, messages.length - 1);
+        const next = Math.min(index + 1, shown.length - 1);
         setIndex(next);
-        setSelected(messages[next]?.id);
+        setSelected(shown[next]?.id);
       } else if (e.key === "k") {
         const next = Math.max(index - 1, 0);
         setIndex(next);
-        setSelected(messages[next]?.id);
+        setSelected(shown[next]?.id);
       } else if (e.key === "e" && selected) {
         markInboxRead(selected, true)
           .then(() => Promise.all([loadMessages(), loadChannels()]))
@@ -83,7 +95,7 @@ export function Inbox({ tell }: InboxProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [index, messages, channels, selected, loadMessages, loadChannels, tell]);
+  }, [index, shown, channels, selected, loadMessages, loadChannels, tell]);
 
   const refresh = () => Promise.all([loadChannels(), loadMessages()]).catch((e) => tell(String(e)));
 
@@ -149,17 +161,22 @@ export function Inbox({ tell }: InboxProps) {
   };
 
   return (
-    <section className="inboxpage">
+    <>
+      <Topbar
+        search={{ value: query, onChange: setQuery, placeholder: "Search replies..." }}
+        status={`${unread} unread`}
+        action={
+          <Button onClick={runSync}>
+            <RefreshCw size={15} />Sync
+          </Button>
+        }
+      />
+
+      <section className="inboxpage">
       <header className="pagehead">
-        <div>
-          <label>CONVERSATIONS</label>
-          <h2>Inbox</h2>
-        </div>
+        <h2>Inbox</h2>
       </header>
       <div className="inboxtools">
-        <Button variant="ghost" onClick={runSync}>
-          <RefreshCw size={15} />Sync replies
-        </Button>
         <Button variant="ghost" onClick={runClassify}>
           <Sparkles size={15} />Classify
         </Button>
@@ -196,8 +213,8 @@ export function Inbox({ tell }: InboxProps) {
         </aside>
 
         <div className="messagelist">
-          {messages.length ? (
-            messages.map((m, i) => (
+          {shown.length ? (
+            shown.map((m, i) => (
               <div className={selected === m.id ? "messagerow on" : "messagerow"} key={m.id}>
                 <input
                   type="checkbox"
@@ -262,12 +279,12 @@ export function Inbox({ tell }: InboxProps) {
                 </div>
               )}
               <div className="threadactions">
-                <Button onClick={() => selected && markInboxRead(selected, true).then(refresh)}>Mark done</Button>
+                <Button onClick={() => selected && markInboxRead(selected, true).then(refresh)}>Done</Button>
                 <Button variant="ghost" onClick={snoozeSelected}>
-                  Snooze 1 day
+                  Snooze
                 </Button>
                 <Button variant="ghost" onClick={suppressSelected}>
-                  Add to suppression
+                  Suppress
                 </Button>
               </div>
             </>
@@ -278,6 +295,7 @@ export function Inbox({ tell }: InboxProps) {
           )}
         </div>
       </div>
-    </section>
+      </section>
+    </>
   );
 }
