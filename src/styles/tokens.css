@@ -10,27 +10,24 @@
   --ink-2: #6b6b73;
   --ink-3: #a1a1aa;
 
-  /* One accent, reserved for the primary button and the "active" dot. */
-  --accent: #c6f432;
-  --accent-ink: #111114;
+  /* Monochrome: the primary button and the "active" dot use ink, not a hue. */
+  --accent: #111114;
+  --accent-ink: #f7f7f8;
 
-  /* Fixed, theme-independent values that sit on top of color (gradients, badges). */
+  /* Fixed, theme-independent values that sit on top of color (badges). */
   --paper: #ffffff;
   --paper-ink: #111114;
   --red: #ef4444;
-  --star: #f5b301;
+  --star: #6b6b73;
 
   --ok: #16a34a;
   --warn: #d98a00;
   --bad: #d64545;
 
-  --tint-lilac: #e6e4fb;
-  --tint-blue: #dbeafb;
-  --tint-peach: #fde6d6;
-  --tint-mint: #dcf3e6;
-
-  --grad-a: linear-gradient(135deg, #2f4bd8, #7c5cf0);
-  --grad-b: linear-gradient(135deg, #2f4bd8, #f472b6);
+  --tint-lilac: #f0f0f3;
+  --tint-blue: #f0f0f3;
+  --tint-peach: #f0f0f3;
+  --tint-mint: #f0f0f3;
 
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
 
@@ -54,26 +51,24 @@
   --ink-2: #a1a1aa;
   --ink-3: #6b6b73;
 
-  --accent: #c6f432;
-  --accent-ink: #111114;
+  /* Monochrome: the primary button and the "active" dot use ink, not a hue. */
+  --accent: #f4f4f5;
+  --accent-ink: #0e0e10;
 
   --paper: #ffffff;
   --paper-ink: #111114;
   --red: #ef4444;
-  --star: #f5b301;
+  --star: #a1a1aa;
 
   --ok: #22c55e;
   --warn: #d98a00;
   --bad: #ef4444;
 
-  /* Same tints, darkened and desaturated to ~15-18% lightness. */
-  --tint-lilac: #242235;
-  --tint-blue: #1c2733;
-  --tint-peach: #38281c;
-  --tint-mint: #21322a;
-
-  --grad-a: linear-gradient(135deg, #2f4bd8, #7c5cf0);
-  --grad-b: linear-gradient(135deg, #2f4bd8, #f472b6);
+  /* Same neutral surface in both themes; tints no longer carry a hue. */
+  --tint-lilac: #1f1f24;
+  --tint-blue: #1f1f24;
+  --tint-peach: #1f1f24;
+  --tint-mint: #1f1f24;
 
   --shadow-1: none;
 

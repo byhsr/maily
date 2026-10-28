@@ -42,6 +42,7 @@ export const saveCampaignGraph = (campaignId: string, nodes: GraphNode[], edges:
 export const validateCampaignGraph = (campaignId: string) => api<GraphValidation>("validate_campaign_graph", { campaignId });
 export const launchCampaign = (campaignId: string) => api<number>("launch_campaign", { campaignId });
 export const pauseCampaign = (campaignId: string) => api<void>("pause_campaign", { campaignId });
+export const deleteCampaign = (campaignId: string) => api<void>("delete_campaign", { campaignId });
 export const previewPath = (campaignId: string, leadId: string) => api<PathStep[]>("preview_path", { campaignId, leadId });
 
 export const syncInbox = (accountId?: string) => api<number>("sync_inbox", { accountId: accountId ?? null });

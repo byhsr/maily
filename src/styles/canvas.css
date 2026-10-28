@@ -79,6 +79,64 @@
   flex: none;
 }
 
+.cv-node-add[draggable="true"] {
+  cursor: grab;
+}
+
+.cv-node-add[draggable="true"]:active {
+  cursor: grabbing;
+}
+
+/* Destructive confirmation, scoped to the workspace like the drawers. */
+.cv-confirm {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgb(0 0 0 / 0.55);
+}
+
+.cv-confirm-card {
+  width: min(400px, calc(100% - 40px));
+  padding: 20px;
+  border: 1px solid var(--cv-card-line);
+  border-radius: 14px;
+  background: #17171a;
+  box-shadow: 0 24px 60px rgb(0 0 0 / 0.6);
+}
+
+.cv-confirm-card h3 {
+  margin: 0 0 8px;
+  color: var(--cv-ink);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.cv-confirm-card p {
+  margin: 0 0 18px;
+  color: var(--cv-ink-2);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.cv-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.cv-run.danger {
+  background: #ff6b6b;
+  color: #1a1a1c;
+}
+
+.cv-pill:hover.cv-danger,
+.cv-pill.danger:hover {
+  border-color: #ff6b6b;
+  color: #ff8b8b;
+}
+
 .cv-back {
   flex: none;
   width: 30px;

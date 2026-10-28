@@ -627,35 +627,30 @@ button svg {
 .cardhead {
   position: relative;
   flex: none;
-  height: 90px;
-  background: var(--grad-a);
-}
-
-.campaigncard:nth-child(2n) .cardhead {
-  background: var(--grad-b);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 10px 0;
+  background: none;
 }
 
 .cardhead .kebab,
 .cardhead .pin {
-  position: absolute;
-  top: 10px;
+  position: static;
   width: 28px;
   height: 28px;
   padding: 0;
   justify-content: center;
   border: 0;
   border-radius: 9px;
-  background: var(--paper);
-  color: var(--paper-ink);
+  background: transparent;
+  color: var(--ink-3);
 }
 
-.cardhead .kebab {
-  right: 10px;
-}
-
-.cardhead .pin {
-  left: 10px;
-  color: var(--star);
+.cardhead .kebab:hover,
+.cardhead .pin:hover {
+  background: var(--surface-2);
+  color: var(--ink);
 }
 
 .cardhead .kebab svg {
@@ -675,7 +670,7 @@ button svg {
   align-items: stretch;
   gap: 0;
   width: 100%;
-  margin-top: -16px;
+  margin-top: 0;
   padding: 14px;
   border: 0;
   border-radius: var(--r-card) var(--r-card) 0 0;

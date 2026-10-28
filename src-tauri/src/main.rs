@@ -957,6 +957,36 @@ async fn pause_campaign(state: State<'_, AppState>, campaign_id: String) -> Resu
     Ok(())
 }
 
+#[tauri::command]
+async fn delete_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<()> {
+    let mut tx = state.db.begin().await.map_err(err)?;
+    // Queued sends are keyed by `campaign:lead:node`, so clear them before the
+    // campaign row goes away and the scheduler can no longer resolve it.
+    sqlx::query("DELETE FROM jobs WHERE idempotency_key LIKE ?")
+        .bind(format!("{}:%", campaign_id))
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    for table in ["campaign_leads", "campaign_edges", "campaign_nodes", "sequence_steps"] {
+        sqlx::query(&format!("DELETE FROM {} WHERE campaign_id=?", table))
+            .bind(&campaign_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    let removed = sqlx::query("DELETE FROM campaigns WHERE id=?")
+        .bind(&campaign_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?
+        .rows_affected();
+    if removed == 0 {
+        return Err("Campaign not found".into());
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(())
+}
+
 /// Convert any legacy linear `sequence_steps` into a Start -> (Delay -> Email)* -> End graph.
 /// Lazy and idempotent: only runs while a campaign still has no nodes.
 async fn convert_sequence_steps(db: &SqlitePool, campaign_id: &str) -> Result<()> {
@@ -2150,6 +2180,7 @@ fn main() {
             preview_path,
             launch_campaign,
             pause_campaign,
+            delete_campaign,
             sync_inbox,
             classify_inbox,
             list_channels,

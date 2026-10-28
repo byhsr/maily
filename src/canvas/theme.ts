@@ -39,9 +39,9 @@ export const theme = {
   },
   port: {
     size: 8,
-    out: "#7CFFB2",
+    out: "#C9C9CE",
     neg: "#FF6B6B",
-    neutral: "#8A8A90",
+    neutral: "#6A6A70",
     ring: "rgba(11, 11, 12, 0.9)",
   },
   edge: {
@@ -50,7 +50,7 @@ export const theme = {
     width: 1.5,
   },
   accent: {
-    run: "#7CFFB2",
+    run: "#E7E7EA",
     runInk: "#0B0B0C",
   },
   pill: {
@@ -81,19 +81,19 @@ export const toneFor = (status: string): PillTone =>
 
 /** Node-type accents keep the canvas scannable without adding much colour. */
 const ACCENTS: Record<string, string> = {
-  audience: "#8AC7FF",
-  settings: "#C9A7FF",
-  email: "#7CFFB2",
-  wait: "#F5D76E",
-  followup: "#7CFFB2",
-  classifier: "#F7A8D8",
-  action: "#FF9F6B",
-  results: "#8A8A90",
+  audience: "#9FA0A6",
+  settings: "#9FA0A6",
+  email: "#9FA0A6",
+  wait: "#9FA0A6",
+  followup: "#9FA0A6",
+  classifier: "#9FA0A6",
+  action: "#9FA0A6",
+  results: "#6A6A70",
   // Legacy node types stay themed so older graphs still render.
-  start: "#8AC7FF",
-  delay: "#F5D76E",
-  condition: "#F7A8D8",
-  end: "#8A8A90",
+  start: "#9FA0A6",
+  delay: "#9FA0A6",
+  condition: "#9FA0A6",
+  end: "#6A6A70",
 };
 
 export const nodeAccent = (type: string): string => ACCENTS[type] ?? theme.text.secondary;

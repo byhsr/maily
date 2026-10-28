@@ -66,49 +66,6 @@ export function summarize(nodeType: NodeType, config: Record<string, unknown>, t
   }
 }
 
-/** The shipped default flow from the build guide. */
-export function defaultFlow(): { nodes: GraphNode[]; edges: GraphEdge[] } {
-  const raw: [NodeType, Record<string, unknown>, number, number][] = [
-    ["start", {}, 0, 0],
-    ["email", { variant: "a" }, 0, 150],
-    ["delay", { minutes: 4320 }, 0, 300],
-    ["condition", { kind: "replied" }, 0, 450],
-    ["action", { kind: "tag", tag: "Interested" }, 300, 600],
-    ["end", { outcome: "replied" }, 300, 750],
-    ["email", { subject: "Re: follow-up", variant: "a" }, 0, 600],
-    ["delay", { minutes: 5760 }, 0, 750],
-    ["condition", { kind: "replied" }, 0, 900],
-    ["action", { kind: "tag", tag: "Interested" }, 300, 1050],
-    ["end", { outcome: "replied" }, 300, 1200],
-    ["email", { variant: "breakup" }, 0, 1050],
-    ["delay", { minutes: 7200 }, 0, 1200],
-    ["end", { outcome: "completed" }, 0, 1350],
-  ];
-  const nodes: GraphNode[] = raw.map(([type, config, x, y]) => ({ id: newId(type), type, config, x, y }));
-  const link = (from: number, to: number, label: EdgeLabel): GraphEdge => ({
-    id: newId("edge"),
-    from_node: nodes[from].id,
-    to_node: nodes[to].id,
-    label,
-  });
-  const edges: GraphEdge[] = [
-    link(0, 1, "next"),
-    link(1, 2, "next"),
-    link(2, 3, "next"),
-    link(3, 4, "yes"),
-    link(3, 6, "no"),
-    link(4, 5, "next"),
-    link(6, 7, "next"),
-    link(7, 8, "next"),
-    link(8, 9, "yes"),
-    link(8, 11, "no"),
-    link(9, 10, "next"),
-    link(11, 12, "next"),
-    link(12, 13, "next"),
-  ];
-  return { nodes, edges };
-}
-
 export function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
   const adjacency = new Map<string, string[]>();
   for (const edge of edges) {

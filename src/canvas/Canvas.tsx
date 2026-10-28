@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Mail, Play, Plus } from "lucide-react";
+import { ArrowLeft, Mail, Play, Plus, Trash2 } from "lucide-react";
 import {
   Background,
   BackgroundVariant,
   Controls,
   MiniMap,
   ReactFlow,
+  ReactFlowProvider,
   addEdge,
   useEdgesState,
   useNodesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type Node,
+  type OnEdgesChange,
+  type OnNodesChange,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  deleteCampaign,
   launchCampaign,
   loadCampaignGraph,
   pauseCampaign,
@@ -28,7 +33,6 @@ import {
   NODE_META,
   PALETTE,
   defaultConfig,
-  defaultFlow,
   fromFlow,
   layoutGraph,
   newId,
@@ -42,6 +46,57 @@ import { NodeCard } from "./NodeCard";
 import { canvasVars, nodeAccent, theme } from "./theme";
 
 const nodeTypes = { campaign: NodeCard };
+const DRAG_TYPE = "application/maily-node";
+const CARD_HALF_WIDTH = 134;
+const CARD_HALF_HEIGHT = 18;
+
+type FlowSurfaceProps = {
+  nodes: Node<CampaignNodeData>[];
+  edges: Edge[];
+  onNodesChange: OnNodesChange<Node<CampaignNodeData>>;
+  onEdgesChange: OnEdgesChange<Edge>;
+  onConnect: (connection: Connection) => void;
+  onSelectNode: (id?: string) => void;
+  onDropNode: (type: NodeType, position: { x: number; y: number }) => void;
+};
+
+/** The React Flow surface plus the drop target for nodes dragged from the bar. */
+function FlowSurface({ nodes, edges, onNodesChange, onEdgesChange, onConnect, onSelectNode, onDropNode }: FlowSurfaceProps) {
+  const { screenToFlowPosition } = useReactFlow();
+
+  return (
+    <div
+      className="cv-flow"
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const type = e.dataTransfer.getData(DRAG_TYPE) as NodeType;
+        if (!type || !NODE_META[type]) return;
+        const point = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+        onDropNode(type, { x: point.x - CARD_HALF_WIDTH, y: point.y - CARD_HALF_HEIGHT });
+      }}
+    >
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        onNodeClick={(_, node) => onSelectNode(node.id)}
+        onPaneClick={() => onSelectNode(undefined)}
+        fitView
+      >
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color={theme.canvas.dot} />
+        <MiniMap pannable zoomable maskColor="rgba(11,11,12,0.72)" />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+    </div>
+  );
+}
 
 type CampaignCanvasProps = {
   campaigns: Campaign[];
@@ -62,6 +117,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const [issues, setIssues] = useState<string[]>([]);
   const [selected, setSelected] = useState<string>();
   const [running, setRunning] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const refresh = useCallback(
     async (id: string) => {
@@ -71,9 +127,8 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
         return;
       }
       const graph = await loadCampaignGraph(id);
-      const base = graph.nodes.length ? { nodes: graph.nodes, edges: graph.edges } : defaultFlow();
-      setNodes(toFlow(base, graph.counts, templates, []));
-      setEdges(toEdges(base.edges));
+      setNodes(toFlow({ nodes: graph.nodes, edges: graph.edges }, graph.counts, templates, []));
+      setEdges(toEdges(graph.edges));
       setIssues([]);
       setSelected(undefined);
     },
@@ -129,7 +184,21 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
       setCampaignId(created);
       onSelect(created);
       reload();
-      tell("Campaign created — build the sequence");
+      tell("Campaign created — add your first node");
+    } catch (e) {
+      tell(String(e));
+    }
+  };
+
+  const removeCampaign = async () => {
+    try {
+      await deleteCampaign(campaignId);
+      setConfirming(false);
+      setCampaignId("");
+      onSelect(undefined);
+      reload();
+      onBack();
+      tell("Campaign deleted");
     } catch (e) {
       tell(String(e));
     }
@@ -139,42 +208,40 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
     (connection: Connection) => {
       const label = connection.sourceHandle && connection.sourceHandle !== "out" ? connection.sourceHandle : "next";
       setEdges((current) =>
-        addEdge(
-          {
-            ...connection,
-            id: newId("edge"),
-            data: { label },
-            label: label === "next" ? undefined : label,
-            animated: false,
-          },
-          current
-        )
+        addEdge({ ...connection, id: newId("edge"), data: { label }, label: label === "next" ? undefined : label }, current)
       );
     },
     [setEdges]
   );
 
+  const addNodeAt = useCallback(
+    (type: NodeType, position: { x: number; y: number }) => {
+      const config = defaultConfig(type);
+      setNodes((current) => [
+        ...current,
+        {
+          id: newId(type),
+          type: "campaign",
+          position,
+          data: {
+            nodeType: type,
+            kind: NODE_META[type].label,
+            label: NODE_META[type].label,
+            summary: summarize(type, config, templates),
+            count: 0,
+            invalid: false,
+            branches: Boolean(NODE_META[type].branches),
+            config,
+          },
+        },
+      ]);
+    },
+    [setNodes, templates]
+  );
+
   const addNode = (type: NodeType) => {
     const y = nodes.reduce((max, n) => Math.max(max, n.position.y), 0) + 160;
-    const config = defaultConfig(type);
-    setNodes((current) => [
-      ...current,
-      {
-        id: newId(type),
-        type: "campaign",
-        position: { x: 320, y },
-        data: {
-          nodeType: type,
-          kind: NODE_META[type].label,
-          label: NODE_META[type].label,
-          summary: summarize(type, config, templates),
-          count: 0,
-          invalid: false,
-          branches: Boolean(NODE_META[type].branches),
-          config,
-        },
-      },
-    ]);
+    addNodeAt(type, { x: 120, y });
   };
 
   const updateConfig = (id: string, patch: Record<string, unknown>) => {
@@ -263,7 +330,17 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
         <span className="cv-divider" />
         <div className="cv-nodes">
           {PALETTE.map((type) => (
-            <button className="cv-node-add" key={type} onClick={() => addNode(type)} title={`Add ${NODE_META[type].label}`}>
+            <button
+              className="cv-node-add"
+              key={type}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(DRAG_TYPE, type);
+                e.dataTransfer.effectAllowed = "copy";
+              }}
+              onClick={() => addNode(type)}
+              title={`Drag ${NODE_META[type].label} onto the canvas, or click to add`}
+            >
               <i className="cv-dot" style={{ background: nodeAccent(type) }} />
               {NODE_META[type].label}
             </button>
@@ -318,17 +395,16 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
             <button className="cv-pill" onClick={runValidate}>
               Validate
             </button>
+            <button className="cv-pill" onClick={() => setConfirming(true)}>
+              <Trash2 />
+              Delete
+            </button>
             {running ? (
               <button className="cv-run" onClick={runPause}>
                 Pause
               </button>
             ) : (
-              <button
-                className="cv-run"
-                onClick={runLaunch}
-                disabled={!campaignId}
-                title="Validate, then start sending"
-              >
+              <button className="cv-run" onClick={runLaunch} disabled={!campaignId} title="Validate, then start sending">
                 <Play />
                 Run
               </button>
@@ -349,24 +425,17 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
 
       {campaignId ? (
         <div className="cv-wrap">
-          <div className="cv-flow">
-            <ReactFlow
+          <ReactFlowProvider>
+            <FlowSurface
               nodes={nodes}
               edges={edges}
-              nodeTypes={nodeTypes}
               onNodesChange={onNodesChange}
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
-              onNodeClick={(_, node) => setSelected(node.id)}
-              onPaneClick={() => setSelected(undefined)}
-              proOptions={{ hideAttribution: false }}
-              fitView
-            >
-              <Background variant={BackgroundVariant.Dots} gap={22} size={1.4} color={theme.canvas.dot} />
-              <MiniMap pannable zoomable maskColor="rgba(11,11,12,0.72)" />
-              <Controls showInteractive={false} />
-            </ReactFlow>
-          </div>
+              onSelectNode={setSelected}
+              onDropNode={addNodeAt}
+            />
+          </ReactFlowProvider>
           <div className="cv-panel">
             <Inspector
               node={selectedNode}
@@ -391,7 +460,26 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
           <div className="cv-flow" />
           <div className="cv-panel">
             <h4>Get started</h4>
-            <p>Name a campaign in the bar above, then add nodes from the palette to build the sequence.</p>
+            <p>Name a campaign in the bar above, then drag nodes from the palette onto the canvas.</p>
+          </div>
+        </div>
+      )}
+
+      {confirming && (
+        <div className="cv-confirm" onMouseDown={() => setConfirming(false)}>
+          <div className="cv-confirm-card" onMouseDown={(e) => e.stopPropagation()}>
+            <h3>Delete this campaign?</h3>
+            <p>
+              The sequence, its enrolled leads and any pending sends are removed. This cannot be undone.
+            </p>
+            <div className="cv-confirm-actions">
+              <button className="cv-pill" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button className="cv-run danger" onClick={removeCampaign}>
+                Delete campaign
+              </button>
+            </div>
           </div>
         </div>
       )}
