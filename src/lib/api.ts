@@ -12,6 +12,8 @@ import type {
   InboxThread,
   Lead,
   LeadList,
+  LlmModel,
+  OllamaModel,
   PathStep,
   Template,
 } from "./types";
@@ -34,9 +36,17 @@ export const saveTemplate = (input: Record<string, unknown>) =>
   api<string>("save_template", { input });
 export const runAgent = (input: Record<string, unknown>) =>
   api<string>("run_agent", { input });
-export const testOllama = (url: string) => api<unknown[]>("test_ollama", { url });
+export const testOllama = (url: string) => api<OllamaModel[]>("test_ollama", { url });
 export const saveSetting = (input: { key: string; value: unknown }) =>
   api<void>("save_setting", { input });
+export const getSettings = () => api<Record<string, unknown>>("get_settings");
+
+export const saveOpenrouterKey = (key: string) => api<void>("save_openrouter_key", { key });
+export const openrouterKeyStatus = () => api<{ stored: boolean }>("openrouter_key_status");
+export const clearOpenrouterKey = () => api<void>("clear_openrouter_key");
+export const listOpenrouterModels = (refresh = false) => api<LlmModel[]>("list_openrouter_models", { refresh });
+export const testLlm = (model: string) =>
+  api<{ model: string; latency_ms: number; sample: unknown; cost: number }>("test_llm", { model });
 
 export const loadCampaignGraph = (campaignId: string) => api<CampaignGraph>("load_campaign_graph", { campaignId });
 export const saveCampaignGraph = (campaignId: string, nodes: GraphNode[], edges: GraphEdge[]) =>

@@ -23,6 +23,29 @@ export type LeadList = {
   count: number;
 };
 
+/** An entry in the OpenRouter catalog, cached by the backend. */
+export type LlmModel = {
+  id: string;
+  name?: string;
+  context_length?: number;
+  prompt_price?: string | number;
+  completion_price?: string | number;
+};
+
+/** Which model each job picks by default. Any slot may be blank. */
+export type LlmSettings = {
+  default_model?: string;
+  drafter_model?: string;
+  classifier_model?: string;
+  style_model?: string;
+};
+
+export type OllamaModel = {
+  name: string;
+  size?: number;
+  modified_at?: string;
+};
+
 export type Template = {
   id: string;
   name: string;

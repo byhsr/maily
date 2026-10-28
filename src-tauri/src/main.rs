@@ -30,6 +30,163 @@ fn vault(account: &str) -> std::result::Result<keyring::Entry, String> {
     keyring::Entry::new("com.maily.desktop", account).map_err(err)
 }
 
+/// Reads a JSON value out of app_settings.
+async fn setting(db: &SqlitePool, key: &str) -> Option<Value> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM app_settings WHERE key=?")
+        .bind(key)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// The Ollama base URL, falling back to the local default.
+async fn ollama_base(db: &SqlitePool) -> String {
+    setting(db, "ollama_url")
+        .await
+        .and_then(|value| value.as_str().map(|text| text.to_string()))
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:11434".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn openrouter_key() -> Result<String> {
+    vault("openrouter_api_key")?
+        .get_password()
+        .map_err(|_| "No OpenRouter API key saved. Add one in Settings under Models.".to_string())
+}
+
+/// Model strings are `<provider>:<model>`; `openrouter:` may be left implicit.
+fn model_id(model: &str) -> &str {
+    model.strip_prefix("openrouter:").unwrap_or(model)
+}
+
+/// Resolves the model for a settings slot, falling back to the default slot.
+async fn model_for(db: &SqlitePool, slot: &str) -> String {
+    let llm = setting(db, "llm").await.unwrap_or_else(|| json!({}));
+    for key in [slot, "default_model"] {
+        if let Some(value) = llm[key].as_str() {
+            if !value.trim().is_empty() {
+                return value.trim().to_string();
+            }
+        }
+    }
+    "ollama:llama3.2".to_string()
+}
+
+struct LlmOutcome {
+    value: Value,
+    model: String,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cost: f64,
+}
+
+/// Models sometimes wrap JSON in a fenced block despite response_format.
+fn parse_model_json(text: &str) -> Result<Value> {
+    let trimmed = text.trim();
+    let body = match trimmed.strip_prefix("```") {
+        Some(rest) => rest
+            .trim_start_matches("json")
+            .trim_end_matches("```")
+            .trim(),
+        None => trimmed,
+    };
+    serde_json::from_str::<Value>(body).map_err(|_| {
+        format!(
+            "Model did not return valid JSON: {}",
+            trimmed.chars().take(200).collect::<String>()
+        )
+    })
+}
+
+/// Every model call in the app goes through here: `ollama:<name>` hits the local
+/// server, anything else (optionally `openrouter:` prefixed) hits OpenRouter.
+async fn llm_json(
+    st: &AppState,
+    model: &str,
+    system: Option<&str>,
+    user: &str,
+    timeout_secs: u64,
+) -> Result<LlmOutcome> {
+    let timeout = std::time::Duration::from_secs(timeout_secs.clamp(5, 300));
+
+    if let Some(name) = model.strip_prefix("ollama:") {
+        let base = ollama_base(&st.db).await;
+        let prompt = match system {
+            Some(system) => format!("{}\n\n{}", system, user),
+            None => user.to_string(),
+        };
+        let body: Value = st
+            .http
+            .post(format!("{base}/api/generate"))
+            .json(&json!({"model": name, "prompt": prompt, "stream": false, "format": "json"}))
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(|e| format!("Could not reach Ollama at {base}: {e}"))?
+            .error_for_status()
+            .map_err(err)?
+            .json()
+            .await
+            .map_err(err)?;
+        return Ok(LlmOutcome {
+            value: parse_model_json(body["response"].as_str().unwrap_or_default())?,
+            model: model.to_string(),
+            prompt_tokens: body["prompt_eval_count"].as_i64().unwrap_or(0),
+            completion_tokens: body["eval_count"].as_i64().unwrap_or(0),
+            cost: 0.0,
+        });
+    }
+
+    let key = openrouter_key()?;
+    let mut messages = Vec::new();
+    if let Some(system) = system {
+        messages.push(json!({"role": "system", "content": system}));
+    }
+    messages.push(json!({"role": "user", "content": user}));
+    let response = st
+        .http
+        .post("https://openrouter.ai/api/v1/chat/completions")
+        .bearer_auth(key)
+        .json(&json!({
+            "model": model_id(model),
+            "messages": messages,
+            "response_format": {"type": "json_object"},
+            "usage": {"include": true}
+        }))
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| format!("OpenRouter request failed: {e}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|_| format!("OpenRouter returned {status} with a non-JSON body"))?;
+    if !status.is_success() {
+        let detail = body["error"]["message"]
+            .as_str()
+            .unwrap_or("no further detail")
+            .to_string();
+        return Err(match status.as_u16() {
+            401 => format!("OpenRouter rejected the API key (401): {detail}"),
+            402 => format!("OpenRouter reports no remaining credit (402): {detail}"),
+            429 => format!("OpenRouter rate-limited this request (429): {detail}"),
+            _ => format!("OpenRouter returned {status}: {detail}"),
+        });
+    }
+    Ok(LlmOutcome {
+        value: parse_model_json(body["choices"][0]["message"]["content"].as_str().unwrap_or_default())?,
+        model: model_id(model).to_string(),
+        prompt_tokens: body["usage"]["prompt_tokens"].as_i64().unwrap_or(0),
+        completion_tokens: body["usage"]["completion_tokens"].as_i64().unwrap_or(0),
+        cost: body["usage"]["cost"].as_f64().unwrap_or(0.0),
+    })
+}
+
 #[derive(Deserialize)]
 struct LeadInput {
     email: String,
@@ -627,7 +784,9 @@ async fn run_agent(state: State<'_, AppState>, input: AgentInput) -> Result<Stri
     let job_id = x.clone();
     tokio::spawn(async move {
         let _permit = st.agents.acquire().await;
-        let _ = execute_agent(&st, &job_id).await;
+        if let Err(e) = execute_agent(&st, &job_id).await {
+            log(&st.db, "error", "agent", &e).await;
+        }
     });
     Ok(x)
 }
@@ -641,36 +800,65 @@ async fn execute_agent(st: &AppState, run_id: &str) -> Result<()> {
         .fetch_one(&st.db)
         .await
         .map_err(err)?;
+    let kind = r.get::<String, _>("kind");
+    let model = r.get::<String, _>("model");
+    let timeout = r.get::<i64, _>("timeout_seconds") as u64;
+
     sqlx::query("UPDATE agent_runs SET state='running' WHERE id=?")
         .bind(run_id)
         .execute(&st.db)
         .await
         .map_err(err)?;
-    let prompt=format!("You are Maily's {} agent. Return strict JSON only. Use only supplied facts; for research include source URLs and say unknown when evidence is missing. Input: {}",r.get::<String,_>("kind"),r.get::<String,_>("input_json"));
-    let model = r.get::<String, _>("model");
-    let response = if model.starts_with("ollama:") {
-        st.http.post("http://127.0.0.1:11434/api/generate").json(&json!({"model":model.trim_start_matches("ollama:"),"prompt":prompt,"stream":false,"format":"json"})).timeout(std::time::Duration::from_secs(r.get::<i64,_>("timeout_seconds") as u64)).send().await.map_err(err)?.error_for_status().map_err(err)?.json::<Value>().await.map_err(err)?["response"].clone()
-    } else {
-        let key = vault("openrouter_api_key")?.get_password().map_err(|_| {
-            "OpenRouter API key has not been saved in this device's credential vault"
-        })?;
-        st.http.post("https://openrouter.ai/api/v1/chat/completions").bearer_auth(key).json(&json!({"model":model,"messages":[{"role":"user","content":prompt}],"response_format":{"type":"json_object"}})).timeout(std::time::Duration::from_secs(r.get::<i64,_>("timeout_seconds") as u64)).send().await.map_err(err)?.error_for_status().map_err(err)?.json::<Value>().await.map_err(err)?["choices"][0]["message"]["content"].clone()
-    };
-    let parsed = match response {
-        Value::String(s) => {
-            serde_json::from_str::<Value>(&s).map_err(|_| "Model did not return valid JSON")?
+
+    let system = agent_system_prompt(&kind);
+    let outcome = llm_json(st, &model, Some(&system), &r.get::<String, _>("input_json"), timeout).await;
+
+    match outcome {
+        Ok(outcome) => {
+            sqlx::query("UPDATE agent_runs SET state='completed',output_json=?,prompt_tokens=?,completion_tokens=?,cost=?,finished_at=? WHERE id=?")
+                .bind(outcome.value.to_string())
+                .bind(outcome.prompt_tokens)
+                .bind(outcome.completion_tokens)
+                .bind(outcome.cost)
+                .bind(now())
+                .bind(run_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+            Ok(())
         }
-        v => v,
-    };
-    sqlx::query("UPDATE agent_runs SET state='completed',output_json=?,finished_at=? WHERE id=?")
-        .bind(parsed.to_string())
-        .bind(now())
-        .bind(run_id)
-        .execute(&st.db)
-        .await
-        .map_err(err)?;
-    Ok(())
+        Err(e) => {
+            // A failed run must be visible, not stranded in 'running'.
+            sqlx::query("UPDATE agent_runs SET state='failed',error=?,finished_at=? WHERE id=?")
+                .bind(&e)
+                .bind(now())
+                .bind(run_id)
+                .execute(&st.db)
+                .await
+                .ok();
+            Err(e)
+        }
+    }
 }
+/// The system prompt for an agent kind.
+fn agent_system_prompt(kind: &str) -> String {
+    let guidance = match kind {
+        "draft" | "followup" => {
+            "Write in the operator's voice. Never invent facts, metrics, names or claims that were not supplied."
+        }
+        "research" => {
+            "Use only supplied facts and include source URLs. Say unknown when evidence is missing."
+        }
+        "qualify" => "Judge only on the supplied signals, and say unknown rather than guessing.",
+        "classify_reply" => "Classify the reply into exactly one of the allowed labels.",
+        _ => "Use only supplied facts.",
+    };
+    format!(
+        "You are Maily's {} agent. Return strict JSON only. {}",
+        kind, guidance
+    )
+}
+
 #[tauri::command]
 async fn save_openrouter_key(key: String) -> Result<()> {
     if key.trim().is_empty() {
@@ -679,6 +867,90 @@ async fn save_openrouter_key(key: String) -> Result<()> {
     vault("openrouter_api_key")?
         .set_password(key.trim())
         .map_err(err)
+}
+#[tauri::command]
+async fn openrouter_key_status() -> Result<Value> {
+    Ok(json!({"stored": vault("openrouter_api_key")?.get_password().is_ok()}))
+}
+#[tauri::command]
+async fn clear_openrouter_key() -> Result<()> {
+    if let Err(e) = vault("openrouter_api_key")?.delete_credential() {
+        let message = e.to_string().to_lowercase();
+        if !message.contains("no entry") && !message.contains("not found") {
+            return Err(e.to_string());
+        }
+    }
+    Ok(())
+}
+/// The OpenRouter catalog, cached in app_settings so the pickers stay usable offline.
+#[tauri::command]
+async fn list_openrouter_models(state: State<'_, AppState>, refresh: Option<bool>) -> Result<Vec<Value>> {
+    if !refresh.unwrap_or(false) {
+        if let Some(models) = setting(&state.db, "openrouter_models")
+            .await
+            .and_then(|cached| cached["models"].as_array().cloned())
+        {
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
+    }
+    let body: Value = state
+        .http
+        .get("https://openrouter.ai/api/v1/models")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach OpenRouter: {e}"))?
+        .error_for_status()
+        .map_err(err)?
+        .json()
+        .await
+        .map_err(err)?;
+    let models: Vec<Value> = body["data"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            json!({
+                "id": m["id"],
+                "name": m["name"],
+                "context_length": m["context_length"],
+                "prompt_price": m["pricing"]["prompt"],
+                "completion_price": m["pricing"]["completion"],
+            })
+        })
+        .collect();
+    if !models.is_empty() {
+        sqlx::query("INSERT INTO app_settings(key,value,updated_at) VALUES('openrouter_models',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at")
+            .bind(json!({"fetched_at": now(), "models": models}).to_string())
+            .bind(now())
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+    }
+    Ok(models)
+}
+/// Proves key, routing and JSON parsing work end to end.
+#[tauri::command]
+async fn test_llm(state: State<'_, AppState>, model: String) -> Result<Value> {
+    let started = std::time::Instant::now();
+    let outcome = llm_json(
+        state.inner(),
+        &model,
+        Some("You reply with strict JSON only."),
+        "Return exactly {\"ok\":true,\"word\":\"maily\"}.",
+        45,
+    )
+    .await?;
+    let elapsed = started.elapsed().as_millis() as i64;
+    Ok(json!({
+        "model": outcome.model,
+        "latency_ms": elapsed,
+        "sample": outcome.value,
+        "cost": outcome.cost,
+    }))
 }
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Value> {
@@ -765,7 +1037,7 @@ async fn save_campaign_graph(
         .await
         .map_err(err)?;
     for n in &nodes {
-        if !["start", "email", "delay", "condition", "action", "end"].contains(&n.node_type.as_str()) {
+        if !["start", "audience", "email", "delay", "condition", "action", "end"].contains(&n.node_type.as_str()) {
             return Err(format!("Unknown node type: {}", n.node_type));
         }
         sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,?,?,?,?)")
@@ -1832,26 +2104,14 @@ async fn classify_with_model(st: &AppState, text: &str) -> Option<(String, f64)>
         "Classify this cold-email reply into exactly one of: interested, question, not_now, not_interested, referral, out_of_office, unsubscribe, bounce. Return strict JSON {{\"category\":\"...\",\"confidence\":0.0}}. Reply: {}",
         text
     );
-    let body: Value = st
-        .http
-        .post("http://127.0.0.1:11434/api/generate")
-        .json(&json!({"model":"llama3.2","prompt":prompt,"stream":false,"format":"json"}))
-        .timeout(std::time::Duration::from_secs(45))
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let parsed: Value = serde_json::from_str(body["response"].as_str()?).ok()?;
-    let category = parsed["category"].as_str()?.to_string();
+    let model = model_for(&st.db, "classifier_model").await;
+    let outcome = llm_json(st, &model, None, &prompt, 45).await.ok()?;
+    let category = outcome.value["category"].as_str()?.to_string();
     let allowed = ["interested", "question", "not_now", "not_interested", "referral", "out_of_office", "unsubscribe", "bounce"];
     if !allowed.contains(&category.as_str()) {
         return None;
     }
-    Some((category, parsed["confidence"].as_f64().unwrap_or(0.0)))
+    Some((category, outcome.value["confidence"].as_f64().unwrap_or(0.0)))
 }
 
 #[tauri::command]
@@ -2217,6 +2477,10 @@ fn main() {
             run_agent,
             list_agent_runs,
             save_openrouter_key,
+            openrouter_key_status,
+            clear_openrouter_key,
+            list_openrouter_models,
+            test_llm,
             get_settings,
             save_setting,
             test_ollama,

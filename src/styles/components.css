@@ -1557,6 +1557,45 @@ button svg {
   font-size: 12px;
 }
 
+.settingsrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.storedtag {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.modelpick {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.modelpick input {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.modelpick small {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.drawerform > label > small {
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
 .notice {
   position: fixed;
   right: 24px;
