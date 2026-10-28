@@ -18,9 +18,11 @@ type LeadsProps = {
 
 export function Leads({ leads, open, reload, tell }: LeadsProps) {
   const [query, setQuery] = useState("");
+  const [listName, setListName] = useState("Imported");
 
   const importFile = async (file: File) => {
     try {
+      const target = listName.trim() || "Imported";
       const raw = await file.arrayBuffer();
       const book = XLSX.read(raw, { type: "array" });
       const first = book.Sheets[book.SheetNames[0]];
@@ -35,13 +37,13 @@ export function Leads({ leads, open, reload, tell }: LeadsProps) {
             company: get("company", "Company"),
             title: get("title", "Title"),
             website: get("website", "Website"),
-            list_name: "Imported",
+            list_name: target,
             custom_fields: row,
           };
         })
         .filter((x) => x.email);
       const n = await upsertLeads(mapped);
-      tell(`${n} leads imported; duplicates were updated.`);
+      tell(`${n} leads imported into “${target}”; duplicates were updated.`);
       reload();
     } catch (e) {
       tell(`Could not import file: ${String(e)}`);
@@ -73,6 +75,13 @@ export function Leads({ leads, open, reload, tell }: LeadsProps) {
         <header>
           <h2>Leads</h2>
           <div className="actions">
+            <Input
+              className="listname"
+              value={listName}
+              onChange={(e) => setListName(e.target.value)}
+              placeholder="List name"
+              aria-label="Lead list name"
+            />
             <label className="round">
               Import
               <Input type="file" hidden accept=".csv,.xlsx,.xls" onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
@@ -86,7 +95,10 @@ export function Leads({ leads, open, reload, tell }: LeadsProps) {
                 <b>{(l.first_name || l.email)[0]}</b>
                 <span>
                   {l.first_name || l.email}
-                  <small>{l.company || "Needs enrichment"}</small>
+                  <small>
+                    {l.company || "Needs enrichment"}
+                    {l.list_name ? ` · ${l.list_name}` : ""}
+                  </small>
                 </span>
                 <em>{l.title || "Research pending"}</em>
                 <Badge>{l.status}</Badge>

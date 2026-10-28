@@ -15,6 +15,7 @@ export type CampaignNodeData = {
 };
 
 export const NODE_META: Record<NodeType, { label: string; branches?: boolean }> = {
+  audience: { label: "Audience" },
   start: { label: "Start" },
   email: { label: "Email" },
   delay: { label: "Delay" },
@@ -23,7 +24,7 @@ export const NODE_META: Record<NodeType, { label: string; branches?: boolean }> 
   end: { label: "End" },
 };
 
-export const PALETTE: NodeType[] = ["email", "delay", "condition", "action", "end"];
+export const PALETTE: NodeType[] = ["audience", "email", "delay", "condition", "action", "end"];
 
 export const CONDITION_KINDS = [
   ["replied", "Replied"],
@@ -49,6 +50,10 @@ export function formatMinutes(minutes: number): string {
 
 export function summarize(nodeType: NodeType, config: Record<string, unknown>, templates: Template[]): string {
   switch (nodeType) {
+    case "audience": {
+      const list = String(config.list_name ?? "").trim();
+      return list ? `List: ${list}` : "All active leads";
+    }
     case "email": {
       const template = templates.find((t) => t.id === config.template_id);
       return template ? template.name : "Pick a template";
@@ -121,6 +126,8 @@ export function fromFlow(nodes: Node<CampaignNodeData>[], edges: Edge[]): { node
 
 export function defaultConfig(nodeType: NodeType): Record<string, unknown> {
   switch (nodeType) {
+    case "audience":
+      return { list_name: "" };
     case "delay":
       return { minutes: 1440 };
     case "condition":

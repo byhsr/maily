@@ -1,20 +1,37 @@
 import type { Node } from "@xyflow/react";
-import type { Template } from "../lib/types";
+import type { LeadList, Template } from "../lib/types";
 import { ACTION_KINDS, CONDITION_KINDS, type CampaignNodeData } from "./graph";
 
 type InspectorProps = {
   node: Node<CampaignNodeData>;
   templates: Template[];
+  lists: LeadList[];
   onChange: (patch: Record<string, unknown>) => void;
   onDelete: () => void;
 };
 
-export function Inspector({ node, templates, onChange, onDelete }: InspectorProps) {
+export function Inspector({ node, templates, lists, onChange, onDelete }: InspectorProps) {
   const { nodeType, config, label } = node.data;
 
   return (
     <div className="cv-panel">
       <h4>Inspector · {label}</h4>
+      {nodeType === "audience" && (
+        <>
+          <label>
+            Lead list
+            <select value={String(config.list_name ?? "")} onChange={(e) => onChange({ list_name: e.target.value })}>
+              <option value="">All active leads</option>
+              {lists.map((list) => (
+                <option key={list.name} value={list.name}>
+                  {list.name} ({list.count})
+                </option>
+              ))}
+            </select>
+          </label>
+          <p>The campaign only enrolls leads saved in the selected list.</p>
+        </>
+      )}
       {nodeType === "email" && (
         <label>
           Template
@@ -81,7 +98,7 @@ export function Inspector({ node, templates, onChange, onDelete }: InspectorProp
           </select>
         </label>
       )}
-      {nodeType === "start" && <p>Leads enter here and move down the graph.</p>}
+      {nodeType === "start" && <p>Legacy entry node. Add an Audience node to choose leads.</p>}
       {nodeType !== "start" && (
         <button className="cv-danger" onClick={onDelete}>
           Delete node

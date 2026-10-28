@@ -901,6 +901,35 @@ async fn preview_path(state: State<'_, AppState>, campaign_id: String, lead_id: 
     Ok(path)
 }
 
+/// The entry node decides who is enrolled: its `list_name` scopes the audience
+/// to one saved lead list, and an empty list means every active lead.
+async fn entry_node(db: &SqlitePool, campaign_id: &str) -> Result<(String, String)> {
+    let row = sqlx::query(
+        "SELECT id,config_json FROM campaign_nodes WHERE campaign_id=? AND type IN ('audience','start') ORDER BY CASE type WHEN 'audience' THEN 0 ELSE 1 END LIMIT 1",
+    )
+    .bind(campaign_id)
+    .fetch_optional(db)
+    .await
+    .map_err(err)?
+    .ok_or("Graph has no Audience or Start node")?;
+    let config: Value = serde_json::from_str(&row.get::<String, _>("config_json")).unwrap_or(json!({}));
+    let list = config["list_name"].as_str().unwrap_or("").trim().to_string();
+    Ok((row.get::<String, _>("id"), list))
+}
+
+#[tauri::command]
+async fn list_lead_lists(state: State<'_, AppState>) -> Result<Vec<Value>> {
+    sqlx::query("SELECT list_name,count(*) AS count FROM leads GROUP BY list_name ORDER BY list_name")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)
+        .map(|rows| {
+            rows.iter()
+                .map(|r| json!({"name": r.get::<String, _>("list_name"), "count": r.get::<i64, _>("count")}))
+                .collect()
+        })
+}
+
 #[tauri::command]
 async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<usize> {
     let c = sqlx::query("SELECT status,mode,approved_at FROM campaigns WHERE id=?")
@@ -920,22 +949,31 @@ async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Res
         let summary = issues.iter().map(|(message, _)| message.as_str()).collect::<Vec<_>>().join("; ");
         return Err(format!("Graph is not valid: {}", summary));
     }
-    let start: String =
-        sqlx::query_scalar("SELECT id FROM campaign_nodes WHERE campaign_id=? AND type='start' LIMIT 1")
-            .bind(&campaign_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(err)?;
-    let enrolled = sqlx::query(
-        "INSERT OR IGNORE INTO campaign_leads(campaign_id,lead_id,state,current_node_id,entered_node_at) SELECT ?, id, 'active', ?, ? FROM leads WHERE status='active' AND email NOT IN (SELECT email FROM suppressions)",
-    )
-    .bind(&campaign_id)
-    .bind(&start)
-    .bind(now())
-    .execute(&state.db)
-    .await
-    .map_err(err)?
-    .rows_affected();
+    let (entry, list) = entry_node(&state.db, &campaign_id).await?;
+    let enrolled = if list.is_empty() {
+        sqlx::query(
+            "INSERT OR IGNORE INTO campaign_leads(campaign_id,lead_id,state,current_node_id,entered_node_at) SELECT ?, id, 'active', ?, ? FROM leads WHERE status='active' AND email NOT IN (SELECT email FROM suppressions)",
+        )
+        .bind(&campaign_id)
+        .bind(&entry)
+        .bind(now())
+        .execute(&state.db)
+        .await
+        .map_err(err)?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "INSERT OR IGNORE INTO campaign_leads(campaign_id,lead_id,state,current_node_id,entered_node_at) SELECT ?, id, 'active', ?, ? FROM leads WHERE status='active' AND list_name=? AND email NOT IN (SELECT email FROM suppressions)",
+        )
+        .bind(&campaign_id)
+        .bind(&entry)
+        .bind(now())
+        .bind(&list)
+        .execute(&state.db)
+        .await
+        .map_err(err)?
+        .rows_affected()
+    };
     sqlx::query("UPDATE campaigns SET status='active',updated_at=? WHERE id=?")
         .bind(now())
         .bind(&campaign_id)
@@ -1104,11 +1142,18 @@ async fn graph_issues(db: &SqlitePool, campaign_id: &str) -> Result<Vec<(String,
         .collect();
 
     let mut issues = Vec::new();
-    let starts: Vec<&(String, String)> = nodes.iter().filter(|(_, t)| t == "start").collect();
-    if starts.is_empty() {
-        issues.push(("Graph has no Start node".to_string(), None));
-    } else if starts.len() > 1 {
-        issues.push(("Graph has more than one Start node".to_string(), None));
+    // The entry is the Audience node (which lead list to enroll); a legacy Start
+    // node stands in for graphs built before Audience existed.
+    let audiences = nodes.iter().filter(|(_, t)| t == "audience").count();
+    let starts = nodes.iter().filter(|(_, t)| t == "start").count();
+    if audiences > 1 {
+        issues.push(("Graph has more than one Audience node".to_string(), None));
+    } else if audiences == 0 {
+        if starts == 0 {
+            issues.push(("Graph has no Audience or Start node".to_string(), None));
+        } else if starts > 1 {
+            issues.push(("Graph has more than one Start node".to_string(), None));
+        }
     }
     for (id, node_type) in &nodes {
         if node_type == "email" && !edges.iter().any(|(from, _, _)| from == id) {
@@ -2155,6 +2200,7 @@ fn main() {
             dashboard,
             dashboard_stats,
             list_leads,
+            list_lead_lists,
             upsert_leads,
             suppress_lead,
             save_template,

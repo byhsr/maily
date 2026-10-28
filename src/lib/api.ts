@@ -11,6 +11,7 @@ import type {
   InboxMessage,
   InboxThread,
   Lead,
+  LeadList,
   PathStep,
   Template,
 } from "./types";
@@ -22,6 +23,7 @@ export const getDashboard = () => api<DashboardData>("dashboard");
 export const dashboardStats = (range: string) => api<DashboardStats>("dashboard_stats", { range });
 export const listCampaigns = () => api<Campaign[]>("list_campaigns");
 export const listLeads = () => api<Lead[]>("list_leads");
+export const listLeadLists = () => api<LeadList[]>("list_lead_lists");
 export const listTemplates = () => api<Template[]>("list_templates");
 export const seedTemplates = () => api<number>("seed_templates");
 export const upsertLeads = (leads: Record<string, unknown>[]) =>

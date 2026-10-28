@@ -1188,6 +1188,20 @@ button svg {
   cursor: pointer;
 }
 
+.listname {
+  width: 160px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  outline: none;
+}
+
+.listname:focus {
+  border-color: var(--ink-3);
+}
+
 .blank {
   padding: 48px 0;
   text-align: center;

@@ -19,11 +19,12 @@ import {
 import "@xyflow/react/dist/style.css";
 import {
   launchCampaign,
+  listLeadLists,
   loadCampaignGraph,
   pauseCampaign,
   saveCampaignGraph,
 } from "../lib/api";
-import type { Campaign, NodeType, Template } from "../lib/types";
+import type { Campaign, LeadList, NodeType, Template } from "../lib/types";
 import {
   NODE_META,
   PALETTE,
@@ -108,6 +109,13 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const [selected, setSelected] = useState<string>();
   const [running, setRunning] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [lists, setLists] = useState<LeadList[]>([]);
+
+  useEffect(() => {
+    listLeadLists()
+      .then(setLists)
+      .catch(() => setLists([]));
+  }, []);
 
   const refresh = useCallback(
     async (id: string) => {
@@ -318,6 +326,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
               <Inspector
                 node={selectedNode}
                 templates={templates}
+                lists={lists}
                 onChange={(patch) => updateConfig(selectedNode.id, patch)}
                 onDelete={deleteSelected}
               />

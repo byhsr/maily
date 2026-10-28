@@ -13,7 +13,14 @@ export type Lead = {
   first_name?: string;
   company?: string;
   title?: string;
+  list_name?: string;
   status: string;
+};
+
+/** A named group of saved leads; a campaign's Audience node targets one. */
+export type LeadList = {
+  name: string;
+  count: number;
 };
 
 export type Template = {
@@ -61,7 +68,7 @@ export type DashboardStats = {
   activeCampaigns: number;
 };
 
-export type NodeType = "start" | "email" | "delay" | "condition" | "action" | "end";
+export type NodeType = "audience" | "start" | "email" | "delay" | "condition" | "action" | "end";
 export type EdgeLabel = "next" | "yes" | "no";
 
 export type GraphNode = {
