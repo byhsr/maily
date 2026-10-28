@@ -3,21 +3,13 @@ import type { Template } from "../lib/types";
 import { ACTION_KINDS, CONDITION_KINDS, type CampaignNodeData } from "./graph";
 
 type InspectorProps = {
-  node: Node<CampaignNodeData> | undefined;
+  node: Node<CampaignNodeData>;
   templates: Template[];
   onChange: (patch: Record<string, unknown>) => void;
   onDelete: () => void;
 };
 
 export function Inspector({ node, templates, onChange, onDelete }: InspectorProps) {
-  if (!node) {
-    return (
-      <div className="cv-panel">
-        <h4>Inspector</h4>
-        <p>Select a node to configure it.</p>
-      </div>
-    );
-  }
   const { nodeType, config, label } = node.data;
 
   return (

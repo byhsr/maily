@@ -66,44 +66,6 @@ export function summarize(nodeType: NodeType, config: Record<string, unknown>, t
   }
 }
 
-export function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
-  const adjacency = new Map<string, string[]>();
-  for (const edge of edges) {
-    adjacency.set(edge.from_node, [...(adjacency.get(edge.from_node) ?? []), edge.to_node]);
-  }
-  const depth = new Map<string, number>();
-  const start = nodes.find((n) => n.type === "start");
-  const queue: string[] = [];
-  if (start) {
-    depth.set(start.id, 0);
-    queue.push(start.id);
-  }
-  while (queue.length) {
-    const id = queue.shift() as string;
-    const current = depth.get(id) ?? 0;
-    for (const next of adjacency.get(id) ?? []) {
-      if (!depth.has(next) || (depth.get(next) ?? 0) < current + 1) {
-        depth.set(next, current + 1);
-        queue.push(next);
-      }
-    }
-  }
-  let max = 0;
-  depth.forEach((value) => {
-    max = Math.max(max, value);
-  });
-  for (const node of nodes) {
-    if (!depth.has(node.id)) depth.set(node.id, max + 1);
-  }
-  const column = new Map<number, number>();
-  return nodes.map((node) => {
-    const layer = depth.get(node.id) ?? 0;
-    const index = column.get(layer) ?? 0;
-    column.set(layer, index + 1);
-    return { ...node, x: index * 270, y: layer * 150 };
-  });
-}
-
 export function toFlow(
   graph: { nodes: GraphNode[]; edges: GraphEdge[] },
   counts: Record<string, number>,

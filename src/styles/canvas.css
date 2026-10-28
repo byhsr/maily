@@ -534,13 +534,6 @@ textarea.cv-inset {
   font-size: 12px;
 }
 
-.cv-issues {
-  margin: 0;
-  padding-left: 16px;
-  color: #ff8b8b;
-  font-size: 12px;
-}
-
 /* ---------- Results table ---------- */
 .res-page {
   display: flex;

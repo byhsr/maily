@@ -23,7 +23,6 @@ import {
   pauseCampaign,
   saveCampaign,
   saveCampaignGraph,
-  validateCampaignGraph,
 } from "../lib/api";
 import type { Campaign, NodeType, Template } from "../lib/types";
 import { Input } from "../ui/Input";
@@ -32,7 +31,6 @@ import {
   PALETTE,
   defaultConfig,
   fromFlow,
-  layoutGraph,
   newId,
   summarize,
   toEdges,
@@ -112,7 +110,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const [draftName, setDraftName] = useState("");
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<CampaignNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const [issues, setIssues] = useState<string[]>([]);
   const [selected, setSelected] = useState<string>();
   const [running, setRunning] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -127,7 +124,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
       const graph = await loadCampaignGraph(id);
       setNodes(toFlow({ nodes: graph.nodes, edges: graph.edges }, graph.counts, templates, []));
       setEdges(toEdges(graph.edges));
-      setIssues([]);
       setSelected(undefined);
     },
     [setNodes, setEdges, templates]
@@ -148,13 +144,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
     const current = campaigns.find((c) => c.id === campaignId);
     setRunning(current?.status === "active");
   }, [campaigns, campaignId]);
-
-  const startCreating = () => {
-    setCampaignId("");
-    setDraftName("");
-    setCreating(true);
-    onSelect(undefined);
-  };
 
   const cancelCreating = () => {
     const fallback = initialCampaignId ?? campaigns[0]?.id ?? "";
@@ -248,31 +237,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const persist = () => {
     const graph = fromFlow(nodes, edges);
     return saveCampaignGraph(campaignId, graph.nodes, graph.edges);
-  };
-
-  const autoLayout = () => {
-    const graph = fromFlow(nodes, edges);
-    const laid = layoutGraph(graph.nodes, graph.edges);
-    setNodes((current) =>
-      current.map((node) => {
-        const found = laid.find((n) => n.id === node.id);
-        return found ? { ...node, position: { x: found.x, y: found.y } } : node;
-      })
-    );
-  };
-
-  const runValidate = async () => {
-    try {
-      await persist();
-      const result = await validateCampaignGraph(campaignId);
-      setIssues(result.issues);
-      setNodes((current) => current.map((node) => ({ ...node, data: { ...node.data, invalid: result.node_ids.includes(node.id) } })));
-      tell(result.valid ? "Graph is valid" : `${result.issues.length} issue(s) to fix`);
-      return result.valid;
-    } catch (e) {
-      tell(String(e));
-      return false;
-    }
   };
 
   const runLaunch = async () => {
@@ -374,16 +338,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
                 </option>
               ))}
             </select>
-            <button className="cv-pill" onClick={startCreating}>
-              <Plus />
-              New
-            </button>
-            <button className="cv-pill" onClick={autoLayout}>
-              Layout
-            </button>
-            <button className="cv-pill" onClick={runValidate}>
-              Validate
-            </button>
             {running ? (
               <button className="cv-run" onClick={runPause}>
                 Pause
@@ -421,24 +375,16 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
               onDropNode={addNodeAt}
             />
           </ReactFlowProvider>
-          <div className="cv-side">
-            <Inspector
-              node={selectedNode}
-              templates={templates}
-              onChange={(patch) => selected && updateConfig(selected, patch)}
-              onDelete={deleteSelected}
-            />
-            {issues.length > 0 && (
-              <div className="cv-panel">
-                <h4>Issues</h4>
-                <ul className="cv-issues">
-                  {issues.map((issue) => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
+          {selectedNode && (
+            <div className="cv-side">
+              <Inspector
+                node={selectedNode}
+                templates={templates}
+                onChange={(patch) => updateConfig(selectedNode.id, patch)}
+                onDelete={deleteSelected}
+              />
+            </div>
+          )}
         </div>
       ) : (
         <div className="cv-wrap">
