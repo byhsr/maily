@@ -26,10 +26,11 @@ type CampaignCardProps = {
   favourite: boolean;
   onToggleFavourite: () => void;
   onOpen: () => void;
+  onDrafts: () => void;
   onDelete: () => void;
 };
 
-export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDelete }: CampaignCardProps) {
+export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDrafts, onDelete }: CampaignCardProps) {
   const [menu, setMenu] = useState(false);
   const active = campaign.status === "active";
   const when = relTime(campaign.approved_at);
@@ -61,6 +62,14 @@ export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, o
                   }}
                 >
                   Open campaign
+                </button>
+                <button
+                  onClick={() => {
+                    setMenu(false);
+                    onDrafts();
+                  }}
+                >
+                  Review drafts
                 </button>
                 <button
                   className="danger"

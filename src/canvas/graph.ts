@@ -55,8 +55,9 @@ export function summarize(nodeType: NodeType, config: Record<string, unknown>, t
       return list ? `List: ${list}` : "All active leads";
     }
     case "email": {
+      if (config.personalize) return "Agent-written, reviewed before sending";
       const template = templates.find((t) => t.id === config.template_id);
-      return template ? template.name : "Pick a template";
+      return template ? template.name : "Campaign's template";
     }
     case "delay":
       return `Wait ${formatMinutes(Number(config.minutes ?? 0))}`;
@@ -137,7 +138,7 @@ export function defaultConfig(nodeType: NodeType): Record<string, unknown> {
     case "end":
       return { outcome: "completed" };
     case "email":
-      return { variant: "a" };
+      return { variant: "a", personalize: false };
     default:
       return {};
   }

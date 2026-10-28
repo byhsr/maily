@@ -1,10 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AgentDef,
+  AgentRun,
   Campaign,
   CampaignGraph,
   Channel,
   DashboardData,
   DashboardStats,
+  EmailDraft,
   GraphEdge,
   GraphNode,
   GraphValidation,
@@ -76,3 +79,17 @@ export const saveKnowledge = (input: Record<string, unknown>) => api<string>("sa
 export const deleteKnowledge = (id: string) => api<void>("delete_knowledge", { id });
 export const previewKnowledge = (categories?: string[]) =>
   api<string>("preview_knowledge", { categories: categories ?? null });
+
+export const listAgents = () => api<AgentDef[]>("list_agents");
+export const saveAgent = (input: Record<string, unknown>) => api<string>("save_agent", { input });
+export const deleteAgent = (id: string) => api<void>("delete_agent", { id });
+export const listAgentRuns = (limit = 50) => api<AgentRun[]>("list_agent_runs", { limit });
+export const analyzeStyle = () => api<string>("analyze_style");
+
+export const generateDrafts = (campaignId: string, nodeId: string, limit = 10) =>
+  api<number>("generate_drafts", { campaignId, nodeId, limit });
+export const listDrafts = (campaignId?: string, status?: string) =>
+  api<EmailDraft[]>("list_drafts", { campaignId: campaignId ?? null, status: status ?? null });
+export const approveDraft = (id: string, subject?: string, body?: string) =>
+  api<void>("approve_draft", { id, subject: subject ?? null, body: body ?? null });
+export const rejectDraft = (id: string) => api<void>("reject_draft", { id });

@@ -228,6 +228,19 @@ struct AgentInput {
     model: String,
     input: Value,
     timeout_seconds: Option<i64>,
+    agent_id: Option<String>,
+    lead_id: Option<String>,
+    campaign_id: Option<String>,
+}
+#[derive(Deserialize)]
+struct AgentDefInput {
+    id: Option<String>,
+    name: String,
+    kind: String,
+    model: String,
+    system_prompt: Option<String>,
+    knowledge_categories: Option<Value>,
+    enabled: Option<bool>,
 }
 #[derive(Deserialize)]
 struct OAuthConfig {
@@ -903,23 +916,62 @@ async fn finish_oauth(state: State<'_, AppState>, data: OAuthCallback) -> Result
     Ok(json!({"email":email,"provider":provider}))
 }
 
+/// Kinds a run may use. `followup` and `style_analysis` join the original five.
+const AGENT_KINDS: [&str; 7] = [
+    "research",
+    "qualify",
+    "draft",
+    "followup",
+    "classify_reply",
+    "style_analysis",
+    "followup_decision",
+];
+
 #[tauri::command]
 async fn run_agent(state: State<'_, AppState>, input: AgentInput) -> Result<String> {
-    if ![
-        "research",
-        "qualify",
-        "draft",
-        "classify_reply",
-        "followup_decision",
-    ]
-    .contains(&input.kind.as_str())
-    {
+    run_agent_queued(
+        state.inner(),
+        &input.kind,
+        &input.model,
+        input.input,
+        input.timeout_seconds,
+        input.agent_id.as_deref(),
+        input.lead_id.as_deref(),
+        input.campaign_id.as_deref(),
+    )
+    .await
+}
+
+/// Queues one agent run and starts it, bounded by the shared semaphore.
+async fn run_agent_queued(
+    state: &AppState,
+    kind: &str,
+    model: &str,
+    input: Value,
+    timeout_seconds: Option<i64>,
+    agent_id: Option<&str>,
+    lead_id: Option<&str>,
+    campaign_id: Option<&str>,
+) -> Result<String> {
+    if !AGENT_KINDS.contains(&kind) {
         return Err("Unsupported agent task".into());
     }
     let x = id();
-    let timeout = input.timeout_seconds.unwrap_or(90).clamp(10, 300);
-    sqlx::query("INSERT INTO agent_runs(id,kind,state,model,input_json,timeout_seconds,created_at) VALUES(?,?, 'queued',?,?,?,?)").bind(&x).bind(&input.kind).bind(&input.model).bind(input.input.to_string()).bind(timeout).bind(now()).execute(&state.db).await.map_err(err)?;
-    let st = state.inner().clone();
+    let timeout = timeout_seconds.unwrap_or(120).clamp(10, 300);
+    sqlx::query("INSERT INTO agent_runs(id,kind,state,model,input_json,timeout_seconds,agent_id,lead_id,campaign_id,created_at) VALUES(?,?,'queued',?,?,?,?,?,?,?)")
+        .bind(&x)
+        .bind(kind)
+        .bind(model)
+        .bind(input.to_string())
+        .bind(timeout)
+        .bind(agent_id)
+        .bind(lead_id)
+        .bind(campaign_id)
+        .bind(now())
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    let st = state.clone();
     let job_id = x.clone();
     tokio::spawn(async move {
         let _permit = st.agents.acquire().await;
@@ -930,11 +982,420 @@ async fn run_agent(state: State<'_, AppState>, input: AgentInput) -> Result<Stri
     Ok(x)
 }
 #[tauri::command]
-async fn list_agent_runs(state: State<'_, AppState>) -> Result<Vec<Value>> {
-    sqlx::query("SELECT id,kind,state,model,input_json,output_json,error,created_at,finished_at FROM agent_runs ORDER BY created_at DESC LIMIT 50").fetch_all(&state.db).await.map_err(err).map(|rs|rs.iter().map(|r|json!({"id":r.get::<String,_>("id"),"kind":r.get::<String,_>("kind"),"state":r.get::<String,_>("state"),"model":r.get::<String,_>("model"),"input":serde_json::from_str::<Value>(&r.get::<String,_>("input_json")).unwrap_or(json!({})),"output":r.get::<Option<String>,_>("output_json").and_then(|s|serde_json::from_str::<Value>(&s).ok()),"error":r.get::<Option<String>,_>("error"),"created_at":r.get::<String,_>("created_at"),"finished_at":r.get::<Option<String>,_>("finished_at")})).collect())
+async fn list_agent_runs(state: State<'_, AppState>, limit: Option<i64>) -> Result<Vec<Value>> {
+    let rows = sqlx::query("SELECT id,kind,state,model,input_json,output_json,error,agent_id,lead_id,campaign_id,prompt_tokens,completion_tokens,cost,created_at,finished_at FROM agent_runs ORDER BY created_at DESC LIMIT ?")
+        .bind(limit.unwrap_or(50).clamp(1, 200))
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "kind": r.get::<String, _>("kind"),
+                "state": r.get::<String, _>("state"),
+                "model": r.get::<String, _>("model"),
+                "input": serde_json::from_str::<Value>(&r.get::<String, _>("input_json")).unwrap_or(json!({})),
+                "output": r.get::<Option<String>, _>("output_json").and_then(|s| serde_json::from_str::<Value>(&s).ok()),
+                "error": r.get::<Option<String>, _>("error"),
+                "agent_id": r.get::<Option<String>, _>("agent_id"),
+                "lead_id": r.get::<Option<String>, _>("lead_id"),
+                "campaign_id": r.get::<Option<String>, _>("campaign_id"),
+                "prompt_tokens": r.get::<i64, _>("prompt_tokens"),
+                "completion_tokens": r.get::<i64, _>("completion_tokens"),
+                "cost": r.get::<f64, _>("cost"),
+                "created_at": r.get::<String, _>("created_at"),
+                "finished_at": r.get::<Option<String>, _>("finished_at"),
+            })
+        })
+        .collect())
 }
+#[tauri::command]
+async fn list_agents(state: State<'_, AppState>) -> Result<Vec<Value>> {
+    let rows = sqlx::query(
+        "SELECT a.id,a.name,a.kind,a.model,a.system_prompt,a.knowledge_categories,a.enabled,a.updated_at,(SELECT COALESCE(SUM(r.cost),0) FROM agent_runs r WHERE r.agent_id=a.id) AS cost,(SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id=a.id) AS runs FROM agent_defs a ORDER BY a.kind,a.name",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "kind": r.get::<String, _>("kind"),
+                "model": r.get::<String, _>("model"),
+                "system_prompt": r.get::<String, _>("system_prompt"),
+                "knowledge_categories": serde_json::from_str::<Value>(&r.get::<String, _>("knowledge_categories")).unwrap_or(json!([])),
+                "enabled": r.get::<i64, _>("enabled") != 0,
+                "cost": r.get::<f64, _>("cost"),
+                "runs": r.get::<i64, _>("runs"),
+                "updated_at": r.get::<String, _>("updated_at"),
+            })
+        })
+        .collect())
+}
+#[tauri::command]
+async fn save_agent(state: State<'_, AppState>, input: AgentDefInput) -> Result<String> {
+    if input.name.trim().is_empty() || input.model.trim().is_empty() {
+        return Err("An agent needs a name and a model".into());
+    }
+    if !AGENT_KINDS.contains(&input.kind.as_str()) {
+        return Err("Unsupported agent task".into());
+    }
+    let categories = input
+        .knowledge_categories
+        .filter(|value| value.is_array())
+        .unwrap_or_else(|| json!([]));
+    let prompt = input.system_prompt.unwrap_or_default();
+    let enabled = input.enabled.unwrap_or(true) as i64;
+    let t = now();
+    let agent_id = match input.id.filter(|value| !value.trim().is_empty()) {
+        Some(existing) => {
+            let updated = sqlx::query(
+                "UPDATE agent_defs SET name=?,kind=?,model=?,system_prompt=?,knowledge_categories=?,enabled=?,updated_at=? WHERE id=?",
+            )
+            .bind(input.name.trim())
+            .bind(&input.kind)
+            .bind(input.model.trim())
+            .bind(&prompt)
+            .bind(categories.to_string())
+            .bind(enabled)
+            .bind(&t)
+            .bind(&existing)
+            .execute(&state.db)
+            .await
+            .map_err(err)?
+            .rows_affected();
+            if updated == 0 {
+                return Err("That agent no longer exists".into());
+            }
+            existing
+        }
+        None => {
+            let fresh = id();
+            sqlx::query(
+                "INSERT INTO agent_defs(id,name,kind,model,system_prompt,knowledge_categories,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            )
+            .bind(&fresh)
+            .bind(input.name.trim())
+            .bind(&input.kind)
+            .bind(input.model.trim())
+            .bind(&prompt)
+            .bind(categories.to_string())
+            .bind(enabled)
+            .bind(&t)
+            .bind(&t)
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+            fresh
+        }
+    };
+    Ok(agent_id)
+}
+#[tauri::command]
+async fn delete_agent(state: State<'_, AppState>, id: String) -> Result<()> {
+    sqlx::query("DELETE FROM agent_defs WHERE id=?")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+/// Queues one drafting run per enrolled lead that has no draft for this node yet.
+#[tauri::command]
+async fn generate_drafts(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    node_id: String,
+    limit: Option<i64>,
+) -> Result<usize> {
+    let agent = sqlx::query("SELECT id,model FROM agent_defs WHERE kind='draft' AND enabled=1 ORDER BY created_at LIMIT 1")
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?;
+    let (agent_id, model) = match agent {
+        Some(row) => (Some(row.get::<String, _>("id")), row.get::<String, _>("model")),
+        None => (None, model_for(&state.db, "drafter_model").await),
+    };
+    let campaign_name: String = sqlx::query_scalar("SELECT name FROM campaigns WHERE id=?")
+        .bind(&campaign_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?
+        .ok_or("Campaign not found")?;
+    let leads = sqlx::query(
+        "SELECT l.id,l.email,l.first_name,l.last_name,l.company,l.title,l.custom_fields FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? AND l.status='active' AND NOT EXISTS (SELECT 1 FROM email_drafts d WHERE d.campaign_id=cl.campaign_id AND d.lead_id=cl.lead_id AND d.node_id IS ? AND d.state IN ('proposed','approved')) LIMIT ?",
+    )
+    .bind(&campaign_id)
+    .bind(&node_id)
+    .bind(limit.unwrap_or(10).clamp(1, 50))
+    .fetch_all(&state.db)
+    .await
+    .map_err(err)?;
+
+    let mut queued = 0;
+    for lead in &leads {
+        let input = json!({
+            "node_id": node_id,
+            "campaign": campaign_name,
+            "lead": {
+                "email": lead.get::<String, _>("email"),
+                "first_name": lead.get::<Option<String>, _>("first_name"),
+                "last_name": lead.get::<Option<String>, _>("last_name"),
+                "company": lead.get::<Option<String>, _>("company"),
+                "title": lead.get::<Option<String>, _>("title"),
+                "custom_fields": serde_json::from_str::<Value>(&lead.get::<String, _>("custom_fields")).unwrap_or(json!({})),
+            },
+            "instructions": "Write one cold email for this person. Return strict JSON {\"subject\":\"...\",\"body\":\"...\",\"rationale\":\"...\"}. Plain text body, no markdown, no placeholders, under 150 words."
+        });
+        run_agent_queued(
+            state.inner(),
+            "draft",
+            &model,
+            input,
+            Some(150),
+            agent_id.as_deref(),
+            Some(&lead.get::<String, _>("id")),
+            Some(&campaign_id),
+        )
+        .await?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+#[tauri::command]
+async fn list_drafts(
+    state: State<'_, AppState>,
+    campaign_id: Option<String>,
+    status: Option<String>,
+) -> Result<Vec<Value>> {
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT d.id,d.campaign_id,d.lead_id,d.node_id,d.subject,d.body,d.state,d.rationale,d.model,d.created_at,d.approved_at,c.name AS campaign_name,l.email,l.first_name,l.company FROM email_drafts d JOIN campaigns c ON c.id=d.campaign_id JOIN leads l ON l.id=d.lead_id WHERE 1=1",
+    );
+    if let Some(campaign) = campaign_id.filter(|value| !value.trim().is_empty()) {
+        builder.push(" AND d.campaign_id = ").push_bind(campaign);
+    }
+    if let Some(status) = status.filter(|value| !value.trim().is_empty()) {
+        builder.push(" AND d.state = ").push_bind(status);
+    }
+    builder.push(" ORDER BY d.created_at DESC LIMIT 200");
+    let rows = builder.build().fetch_all(&state.db).await.map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "campaign_id": r.get::<String, _>("campaign_id"),
+                "campaign_name": r.get::<String, _>("campaign_name"),
+                "lead_id": r.get::<String, _>("lead_id"),
+                "node_id": r.get::<Option<String>, _>("node_id"),
+                "email": r.get::<String, _>("email"),
+                "first_name": r.get::<Option<String>, _>("first_name"),
+                "company": r.get::<Option<String>, _>("company"),
+                "subject": r.get::<String, _>("subject"),
+                "body": r.get::<String, _>("body"),
+                "state": r.get::<String, _>("state"),
+                "rationale": r.get::<Option<String>, _>("rationale"),
+                "model": r.get::<Option<String>, _>("model"),
+                "created_at": r.get::<String, _>("created_at"),
+                "approved_at": r.get::<Option<String>, _>("approved_at"),
+            })
+        })
+        .collect())
+}
+#[tauri::command]
+async fn approve_draft(
+    state: State<'_, AppState>,
+    id: String,
+    subject: Option<String>,
+    body: Option<String>,
+) -> Result<()> {
+    let row = sqlx::query("SELECT subject,body FROM email_drafts WHERE id=?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?
+        .ok_or("Draft not found")?;
+    let next_subject = subject
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| row.get::<String, _>("subject"));
+    let next_body = body
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| row.get::<String, _>("body"));
+    sqlx::query("UPDATE email_drafts SET state='approved',subject=?,body=?,approved_at=?,updated_at=? WHERE id=?")
+        .bind(next_subject)
+        .bind(next_body)
+        .bind(now())
+        .bind(now())
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+#[tauri::command]
+async fn reject_draft(state: State<'_, AppState>, id: String) -> Result<()> {
+    sqlx::query("UPDATE email_drafts SET state='rejected',updated_at=? WHERE id=?")
+        .bind(now())
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+/// Learns the operator's voice from their templates and anything sent since
+/// send_logs started keeping bodies, and replaces the previous analysis entry.
+#[tauri::command]
+async fn analyze_style(state: State<'_, AppState>) -> Result<String> {
+    let templates = sqlx::query("SELECT name,subject,body FROM templates ORDER BY updated_at DESC LIMIT 30")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let sent = sqlx::query("SELECT subject,body FROM send_logs WHERE body IS NOT NULL ORDER BY created_at DESC LIMIT 30")
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    if templates.is_empty() && sent.is_empty() {
+        return Err("Nothing to analyse yet — add a template or send something first".into());
+    }
+
+    let mut corpus = String::new();
+    for row in &templates {
+        corpus.push_str(&format!(
+            "--- template: {}\nSubject: {}\n{}\n\n",
+            row.get::<String, _>("name"),
+            row.get::<String, _>("subject"),
+            row.get::<String, _>("body")
+        ));
+    }
+    for row in &sent {
+        corpus.push_str(&format!(
+            "--- sent message\nSubject: {}\n{}\n\n",
+            row.get::<Option<String>, _>("subject").unwrap_or_default(),
+            row.get::<Option<String>, _>("body").unwrap_or_default()
+        ));
+    }
+
+    let model = model_for(&state.db, "style_model").await;
+    let prompt = format!(
+        "Study the writing samples below and return strict JSON {{\"title\":\"...\",\"profile\":\"...\",\"rules\":[\"...\"]}}. The profile describes the author's voice in a short paragraph; each rule is one imperative do-or-do-not line a copywriter can follow. Say nothing that the samples do not support.\n\nSamples:\n{}",
+        corpus.chars().take(12000).collect::<String>()
+    );
+    let outcome = llm_json(
+        state.inner(),
+        &model,
+        Some("You analyse writing style and reply with strict JSON only."),
+        &prompt,
+        180,
+    )
+    .await?;
+
+    let title = outcome.value["title"]
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Writing style profile")
+        .to_string();
+    let mut content = outcome.value["profile"].as_str().unwrap_or("").trim().to_string();
+    if let Some(rules) = outcome.value["rules"].as_array() {
+        let lines: Vec<String> = rules
+            .iter()
+            .filter_map(|rule| rule.as_str().map(|text| format!("- {}", text.trim())))
+            .collect();
+        if !lines.is_empty() {
+            content.push_str("\n\nRules:\n");
+            content.push_str(&lines.join("\n"));
+        }
+    }
+    if content.is_empty() {
+        return Err("The model returned an empty style profile".into());
+    }
+
+    sqlx::query("DELETE FROM knowledge WHERE category='style' AND source='analysis'")
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    let entry = id();
+    let t = now();
+    sqlx::query("INSERT INTO knowledge(id,category,title,content,approved,tags,source,created_at,updated_at) VALUES(?,'style',?,?,1,'[\"analysis\"]','analysis',?,?)")
+        .bind(&entry)
+        .bind(&title)
+        .bind(content.trim())
+        .bind(&t)
+        .bind(&t)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    Ok(entry)
+}
+/// Base instructions for a kind, then the agent's own prompt, then the knowledge
+/// base entries that agent is scoped to.
+async fn build_agent_system(st: &AppState, kind: &str, agent_id: Option<&str>) -> String {
+    let mut parts = vec![agent_system_prompt(kind)];
+    let mut categories: Vec<String> = Vec::new();
+    if let Some(agent_id) = agent_id {
+        if let Ok(row) = sqlx::query("SELECT system_prompt,knowledge_categories FROM agent_defs WHERE id=?")
+            .bind(agent_id)
+            .fetch_one(&st.db)
+            .await
+        {
+            let custom: String = row.get("system_prompt");
+            if !custom.trim().is_empty() {
+                parts.push(custom.trim().to_string());
+            }
+            categories = serde_json::from_str::<Vec<String>>(&row.get::<String, _>("knowledge_categories"))
+                .unwrap_or_default();
+        }
+    }
+    let knowledge = knowledge_context(&st.db, &categories).await;
+    if !knowledge.is_empty() {
+        parts.push(format!("Knowledge base:\n{knowledge}"));
+    }
+    parts.join("\n\n")
+}
+
+/// A drafting run produces a proposal, never a send.
+async fn file_draft(
+    st: &AppState,
+    run_id: &str,
+    agent_id: Option<&str>,
+    campaign_id: &str,
+    lead_id: &str,
+    node_id: Option<&str>,
+    model: &str,
+    value: &Value,
+) {
+    let subject = value["subject"].as_str().unwrap_or("").trim();
+    let body = value["body"].as_str().unwrap_or("").trim();
+    if subject.is_empty() || body.is_empty() {
+        return;
+    }
+    let draft = id();
+    let t = now();
+    let _ = sqlx::query(
+        "INSERT INTO email_drafts(id,campaign_id,lead_id,node_id,agent_id,run_id,subject,body,state,rationale,model,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,'proposed',?,?,?,?)",
+    )
+    .bind(&draft)
+    .bind(campaign_id)
+    .bind(lead_id)
+    .bind(node_id)
+    .bind(agent_id)
+    .bind(run_id)
+    .bind(subject)
+    .bind(body)
+    .bind(value["rationale"].as_str())
+    .bind(model)
+    .bind(&t)
+    .bind(&t)
+    .execute(&st.db)
+    .await;
+}
+
 async fn execute_agent(st: &AppState, run_id: &str) -> Result<()> {
-    let r = sqlx::query("SELECT kind,model,input_json,timeout_seconds FROM agent_runs WHERE id=?")
+    let r = sqlx::query("SELECT kind,model,input_json,timeout_seconds,agent_id,lead_id,campaign_id FROM agent_runs WHERE id=?")
         .bind(run_id)
         .fetch_one(&st.db)
         .await
@@ -942,6 +1403,10 @@ async fn execute_agent(st: &AppState, run_id: &str) -> Result<()> {
     let kind = r.get::<String, _>("kind");
     let model = r.get::<String, _>("model");
     let timeout = r.get::<i64, _>("timeout_seconds") as u64;
+    let agent_id: Option<String> = r.get("agent_id");
+    let lead_id: Option<String> = r.get("lead_id");
+    let campaign_id: Option<String> = r.get("campaign_id");
+    let input: Value = serde_json::from_str(&r.get::<String, _>("input_json")).unwrap_or_else(|_| json!({}));
 
     sqlx::query("UPDATE agent_runs SET state='running' WHERE id=?")
         .bind(run_id)
@@ -949,8 +1414,15 @@ async fn execute_agent(st: &AppState, run_id: &str) -> Result<()> {
         .await
         .map_err(err)?;
 
-    let system = agent_system_prompt(&kind);
-    let outcome = llm_json(st, &model, Some(&system), &r.get::<String, _>("input_json"), timeout).await;
+    let system = build_agent_system(st, &kind, agent_id.as_deref()).await;
+    let outcome = llm_json(
+        st,
+        &model,
+        Some(&system),
+        &r.get::<String, _>("input_json"),
+        timeout,
+    )
+    .await;
 
     match outcome {
         Ok(outcome) => {
@@ -964,6 +1436,21 @@ async fn execute_agent(st: &AppState, run_id: &str) -> Result<()> {
                 .execute(&st.db)
                 .await
                 .map_err(err)?;
+            if matches!(kind.as_str(), "draft" | "followup") {
+                if let (Some(campaign_id), Some(lead_id)) = (campaign_id.as_deref(), lead_id.as_deref()) {
+                    file_draft(
+                        st,
+                        run_id,
+                        agent_id.as_deref(),
+                        campaign_id,
+                        lead_id,
+                        input["node_id"].as_str(),
+                        &model,
+                        &outcome.value,
+                    )
+                    .await;
+                }
+            }
             Ok(())
         }
         Err(e) => {
@@ -1789,7 +2276,7 @@ async fn ensure_job(
             .ok_or("No sending account is connected")?,
     };
     let job = id();
-    let payload = json!({"campaign_id":campaign_id,"lead_id":lead_id,"account_id":account}).to_string();
+    let payload = json!({"campaign_id":campaign_id,"lead_id":lead_id,"account_id":account,"node_id":node_id}).to_string();
     sqlx::query("INSERT INTO jobs(id,kind,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'send',?,?,?,?,?)")
         .bind(&job)
         .bind(now())
@@ -1936,11 +2423,76 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
     let lead_id = p["lead_id"].as_str().ok_or("Missing lead id")?;
     let account_id = p["account_id"].as_str().ok_or("Missing account id")?;
     let lead=sqlx::query("SELECT * FROM leads WHERE id=? AND status='active' AND email NOT IN (SELECT email FROM suppressions)").bind(lead_id).fetch_optional(&st.db).await.map_err(err)?.ok_or("Lead is suppressed, inactive, or missing")?;
-    let c=sqlx::query("SELECT c.status,c.approved_at,t.subject,t.body FROM campaigns c JOIN templates t ON t.id=c.template_id WHERE c.id=?").bind(campaign).fetch_one(&st.db).await.map_err(err)?;
+    let c=sqlx::query("SELECT c.status,c.approved_at,t.subject AS campaign_subject,t.body AS campaign_body FROM campaigns c LEFT JOIN templates t ON t.id=c.template_id WHERE c.id=?").bind(campaign).fetch_optional(&st.db).await.map_err(err)?.ok_or("Campaign not found")?;
     if c.get::<String, _>("status") != "active"
         || c.get::<Option<String>, _>("approved_at").is_none()
     {
         return Err("Campaign is paused, cancelled, or unapproved".into());
+    }
+
+    // The email node owns this message: it may name its own template, and it may
+    // opt into an LLM-written draft that a human approved.
+    let mut personalize = false;
+    let mut node_template: Option<String> = None;
+    if let Some(node_id) = p["node_id"].as_str() {
+        if let Some(row) = sqlx::query("SELECT config_json FROM campaign_nodes WHERE id=?")
+            .bind(node_id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?
+        {
+            let config: Value =
+                serde_json::from_str(&row.get::<String, _>("config_json")).unwrap_or(json!({}));
+            personalize = config["personalize"].as_bool().unwrap_or(false);
+            node_template = config["template_id"]
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.to_string());
+        }
+    }
+
+    let mut draft_id: Option<String> = None;
+    let subject_source;
+    let body_source;
+    if personalize {
+        // Never send an unapproved auto-written email: block and flag instead.
+        let node = p["node_id"].as_str();
+        let draft = sqlx::query("SELECT id,subject,body FROM email_drafts WHERE campaign_id=? AND lead_id=? AND node_id IS ? AND state='approved' ORDER BY approved_at DESC LIMIT 1")
+            .bind(campaign)
+            .bind(lead_id)
+            .bind(node)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?;
+        let Some(draft) = draft else {
+            sqlx::query("UPDATE leads SET status='needs_attention',updated_at=? WHERE id=?")
+                .bind(now())
+                .bind(lead_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+            log(&st.db, "warn", "draft_missing", lead_id).await;
+            return Err("No approved draft for this lead; send blocked and lead flagged".into());
+        };
+        draft_id = Some(draft.get::<String, _>("id"));
+        subject_source = draft.get::<String, _>("subject");
+        body_source = draft.get::<String, _>("body");
+    } else if let Some(template_id) = node_template {
+        let t = sqlx::query("SELECT subject,body FROM templates WHERE id=?")
+            .bind(&template_id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?
+            .ok_or("This email node points at a template that no longer exists")?;
+        subject_source = t.get::<String, _>("subject");
+        body_source = t.get::<String, _>("body");
+    } else {
+        subject_source = c
+            .get::<Option<String>, _>("campaign_subject")
+            .ok_or("Neither this email node nor the campaign has a template")?;
+        body_source = c
+            .get::<Option<String>, _>("campaign_body")
+            .ok_or("Neither this email node nor the campaign has a template")?;
     }
     let a = sqlx::query("SELECT provider,email,daily_limit,sent_today FROM accounts WHERE id=?")
         .bind(account_id)
@@ -1960,8 +2512,8 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
         .as_str()
         .ok_or("Stored access token is invalid")?;
     let to = lead.get::<String, _>("email");
-    let subject = render(&c.get::<String, _>("subject"), &lead);
-    let body = render(&c.get::<String, _>("body"), &lead);
+    let subject = render(&subject_source, &lead);
+    let body = render(&body_source, &lead);
     // Never send a literal placeholder: block the send and flag the lead for review.
     if subject.contains("{{") || body.contains("{{") {
         sqlx::query("UPDATE leads SET status='needs_attention',updated_at=? WHERE id=?")
@@ -1992,7 +2544,15 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<()> {
         st.http.post("https://graph.microsoft.com/v1.0/me/sendMail").bearer_auth(access).json(&json!({"message":{"subject":subject,"body":{"contentType":"Text","content":body},"toRecipients":[{"emailAddress":{"address":to}}]}})).send().await.map_err(err)?.error_for_status().map_err(err)?;
         json!({})
     };
-    sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,provider_message_id,status,created_at) VALUES(?,?,?,?,?,?, 'sent',?)").bind(id()).bind(jid).bind(campaign).bind(lead_id).bind(account_id).bind(response["id"].as_str()).bind(now()).execute(&st.db).await.map_err(err)?;
+    sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,provider_message_id,subject,body,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'sent',?)").bind(id()).bind(jid).bind(campaign).bind(lead_id).bind(account_id).bind(response["id"].as_str()).bind(&subject).bind(&body).bind(now()).execute(&st.db).await.map_err(err)?;
+    if let Some(draft_id) = &draft_id {
+        sqlx::query("UPDATE email_drafts SET state='sent',updated_at=? WHERE id=?")
+            .bind(now())
+            .bind(draft_id)
+            .execute(&st.db)
+            .await
+            .map_err(err)?;
+    }
     sqlx::query("UPDATE accounts SET sent_today=sent_today+1,health='healthy',last_health_at=?,updated_at=? WHERE id=?").bind(now()).bind(now()).bind(account_id).execute(&st.db).await.map_err(err)?;
     Ok(())
 }
@@ -2617,6 +3177,14 @@ fn main() {
             finish_oauth,
             run_agent,
             list_agent_runs,
+            list_agents,
+            save_agent,
+            delete_agent,
+            generate_drafts,
+            list_drafts,
+            approve_draft,
+            reject_draft,
+            analyze_style,
             save_openrouter_key,
             openrouter_key_status,
             clear_openrouter_key,

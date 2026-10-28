@@ -48,6 +48,57 @@ export type OllamaModel = {
 
 export type KnowledgeCategory = "offer" | "icp" | "style" | "proof" | "objection" | "product" | "other";
 
+/** A configured agent: instructions, model, and which knowledge it may read. */
+export type AgentDef = {
+  id: string;
+  name: string;
+  kind: string;
+  model: string;
+  system_prompt: string;
+  knowledge_categories: string[];
+  enabled: boolean;
+  cost?: number;
+  runs?: number;
+  updated_at?: string;
+};
+
+export type AgentRun = {
+  id: string;
+  kind: string;
+  state: string;
+  model: string;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown> | null;
+  error?: string | null;
+  agent_id?: string | null;
+  lead_id?: string | null;
+  campaign_id?: string | null;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cost?: number;
+  created_at: string;
+  finished_at?: string | null;
+};
+
+/** An LLM-written email waiting for a human to approve or reject it. */
+export type EmailDraft = {
+  id: string;
+  campaign_id: string;
+  campaign_name: string;
+  lead_id: string;
+  node_id?: string | null;
+  email: string;
+  first_name?: string | null;
+  company?: string | null;
+  subject: string;
+  body: string;
+  state: string;
+  rationale?: string | null;
+  model?: string | null;
+  created_at: string;
+  approved_at?: string | null;
+};
+
 /** An entry in the knowledge base that models are allowed to read. */
 export type KnowledgeEntry = {
   id: string;

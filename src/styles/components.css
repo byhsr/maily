@@ -1684,6 +1684,222 @@ button svg {
   white-space: pre-wrap;
 }
 
+/* ---------- Agents ---------- */
+.agentgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.agentcard {
+  position: relative;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.agentcard h3 {
+  margin: 10px 0 2px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.agentcard .agenticon svg {
+  width: 16px;
+  height: 16px;
+  color: var(--ink-2);
+}
+
+.agentcard code {
+  display: block;
+  margin: 9px 0 11px;
+  color: var(--ink-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.agentmeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.agentedit {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+
+.knowpick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.knowpick .pick {
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.knowpick .pick.on {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.runrows,
+.draftlist {
+  display: flex;
+  flex-direction: column;
+}
+
+.runrow {
+  display: grid;
+  grid-template-columns: 10px 1.8fr 1fr auto;
+  gap: 13px;
+  align-items: center;
+  padding: 11px 10px;
+  border-top: 1px solid var(--line);
+}
+
+.runrow b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.runrow small {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.runrow em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+.runstate {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+
+.runrow.state-completed .runstate {
+  background: var(--ok);
+}
+
+.runrow.state-failed .runstate,
+.runrow.state-failed small {
+  color: var(--bad);
+}
+
+.runrow.state-failed .runstate {
+  background: var(--bad);
+}
+
+.runrow.state-running .runstate,
+.runrow.state-queued .runstate {
+  background: var(--warn);
+}
+
+.runwhen {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.runresult {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runresult p {
+  margin: 0;
+  color: var(--bad);
+  font-size: 12px;
+}
+
+/* ---------- Drafts ---------- */
+.draftcard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  margin-bottom: 12px;
+}
+
+.draftcard.state-approved {
+  border-color: var(--ok);
+}
+
+.draftcard.state-rejected {
+  opacity: 0.55;
+}
+
+.draftcard > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.draftcard b {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.draftcard small {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+.draftcard textarea {
+  min-height: 150px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+
+.cv-toggle {
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.cv-toggle input {
+  margin-top: 2px;
+}
+
+.cv-toggle small {
+  display: block;
+  color: var(--ink-3);
+}
+
 .notice {
   position: fixed;
   right: 24px;

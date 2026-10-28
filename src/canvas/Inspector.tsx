@@ -33,17 +33,30 @@ export function Inspector({ node, templates, lists, onChange, onDelete }: Inspec
         </>
       )}
       {nodeType === "email" && (
-        <label>
-          Template
-          <select value={String(config.template_id ?? "")} onChange={(e) => onChange({ template_id: e.target.value })}>
-            <option value="">Pick a template</option>
-            {templates.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <>
+          <label>
+            Template
+            <select value={String(config.template_id ?? "")} onChange={(e) => onChange({ template_id: e.target.value })}>
+              <option value="">Use the campaign's template</option>
+              {templates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="cv-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(config.personalize)}
+              onChange={(e) => onChange({ personalize: e.target.checked })}
+            />
+            <span>
+              Write each email with an agent
+              <small>Every lead gets an LLM draft you approve before it can send.</small>
+            </span>
+          </label>
+        </>
       )}
       {nodeType === "delay" && (
         <label>

@@ -17,11 +17,12 @@ type CampaignsProps = {
   favourites: string[];
   onToggleFavourite: (id: string) => void;
   onOpenCanvas: (campaign: Campaign) => void;
+  onOpenDrafts: (campaign: Campaign) => void;
   onDelete: (id: string) => Promise<void>;
   tell: (message: string) => void;
 };
 
-export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCanvas, onDelete, tell }: CampaignsProps) {
+export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCanvas, onOpenDrafts, onDelete, tell }: CampaignsProps) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("All");
   const [range, setRange] = useState("Any time");
@@ -71,6 +72,7 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
               favourite={favourites.includes(campaign.id)}
               onToggleFavourite={() => onToggleFavourite(campaign.id)}
               onOpen={() => onOpenCanvas(campaign)}
+              onDrafts={() => onOpenDrafts(campaign)}
               onDelete={() => setPending(campaign)}
             />
           ))}

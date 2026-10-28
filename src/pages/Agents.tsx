@@ -1,24 +1,126 @@
-import { Bot } from "lucide-react";
+import { Bot, Pencil, Plus, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { analyzeStyle, listAgentRuns } from "../lib/api";
+import { agentKindLabel, usageLabel, whenLabel } from "../lib/agents";
+import type { AgentDef, AgentRun } from "../lib/types";
+import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { EmptyState } from "../ui/EmptyState";
 import { Topbar } from "../ui/Topbar";
 
 type AgentsProps = {
+  agents: AgentDef[];
   open: (kind: string) => void;
+  onEdit: (agent: AgentDef) => void;
+  tell: (message: string) => void;
 };
 
-export function Agents({ open }: AgentsProps) {
+export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
+  const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const loadRuns = useCallback(() => {
+    listAgentRuns(25)
+      .then(setRuns)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadRuns();
+    const timer = setInterval(loadRuns, 4000);
+    return () => clearInterval(timer);
+  }, [loadRuns]);
+
+  const learnStyle = async () => {
+    setBusy(true);
+    try {
+      await analyzeStyle();
+      tell("Style profile written to the knowledge base");
+    } catch (e) {
+      tell(String(e));
+    } finally {
+      setBusy(false);
+      loadRuns();
+    }
+  };
+
   return (
     <>
-      <Topbar status="Local" />
-      <section className="agentpage">
-        <h2>
-          Small jobs.<br />
-          <i>Better context.</i>
-        </h2>
-        <p>Research, qualify, draft and classify in isolated local work units.</p>
-        <Button variant="ink" onClick={() => open("agent")}>
-          Run a task <Bot />
-        </Button>
+      <Topbar
+        status={`${agents.length} agent${agents.length === 1 ? "" : "s"}`}
+        action={
+          <Button onClick={() => open("agent")}>
+            <Plus />New agent
+          </Button>
+        }
+      />
+
+      <section className="sheet">
+        <header>
+          <h2>Agents</h2>
+          <div className="actions">
+            <Button variant="ghost" onClick={learnStyle} disabled={busy}>
+              <Sparkles />
+              {busy ? "Analysing…" : "Learn my style"}
+            </Button>
+          </div>
+        </header>
+
+        {agents.length ? (
+          <div className="agentgrid">
+            {agents.map((agent) => (
+              <article className="agentcard" key={agent.id}>
+                <span className="agenticon">
+                  <Bot />
+                </span>
+                <h3>{agent.name}</h3>
+                <p className="muted">{agentKindLabel(agent.kind)}</p>
+                <code>{agent.model || "no model set"}</code>
+                <div className="agentmeta">
+                  <Badge>{agent.enabled ? "enabled" : "disabled"}</Badge>
+                  {agent.knowledge_categories.length > 0 && (
+                    <span title={agent.knowledge_categories.join(", ")}>
+                      {agent.knowledge_categories.length} KB group{agent.knowledge_categories.length === 1 ? "" : "s"}
+                    </span>
+                  )}
+                  {typeof agent.runs === "number" && <span>{agent.runs} run{agent.runs === 1 ? "" : "s"}</span>}
+                  {!!agent.cost && <span>${agent.cost.toFixed(3)}</span>}
+                </div>
+                <button className="round agentedit" onClick={() => onEdit(agent)} aria-label={`Edit ${agent.name}`}>
+                  <Pencil />
+                </button>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState text="No agents configured yet." action={() => open("agent")} />
+        )}
+      </section>
+
+      <section className="sheet">
+        <header>
+          <h2>Recent runs</h2>
+          <div className="actions">
+            <span className="muted">Newest first · refreshes every few seconds</span>
+          </div>
+        </header>
+        {runs.length ? (
+          <div className="runrows">
+            {runs.map((run) => (
+              <div className={`runrow state-${run.state}`} key={run.id}>
+                <i className="runstate" />
+                <span>
+                  <b>{agentKindLabel(run.kind)}</b>
+                  <small>{run.error ? run.error : usageLabel(run) || "no usage reported"}</small>
+                </span>
+                <em>{run.model}</em>
+                <span className="runwhen">{whenLabel(run.finished_at ?? run.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">Nothing has run yet.</p>
+        )}
       </section>
     </>
   );

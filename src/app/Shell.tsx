@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { deleteCampaign, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, saveCampaign } from "../lib/api";
-import type { Campaign, KnowledgeEntry, Lead, Template } from "../lib/types";
+import { deleteCampaign, listAgents, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, saveCampaign } from "../lib/api";
+import type { AgentDef, Campaign, KnowledgeEntry, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
+import { Drafts } from "../pages/Drafts";
 import { Leads } from "../pages/Leads";
 import { Inbox } from "../pages/Inbox";
 import { Templates } from "../pages/Templates";
@@ -51,10 +52,13 @@ export function Shell() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
+  const [agents, setAgents] = useState<AgentDef[]>([]);
   const [note, setNote] = useState("");
   const [favourites, setFavourites] = useState<string[]>(readFavourites);
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
   const [editingKnowledge, setEditingKnowledge] = useState<KnowledgeEntry | undefined>();
+  const [editingAgent, setEditingAgent] = useState<AgentDef | undefined>();
+  const [draftsCampaignId, setDraftsCampaignId] = useState<string | undefined>();
   const [canvasId, setCanvasId] = useState<string | undefined>();
   const [unread, setUnread] = useState(0);
   const [collapsed, setCollapsed] = useState(readCollapsed);
@@ -69,11 +73,18 @@ export function Shell() {
 
   const load = async () => {
     try {
-      const [c, l, t, k] = await Promise.all([listCampaigns(), listLeads(), listTemplates(), listKnowledge()]);
+      const [c, l, t, k, a] = await Promise.all([
+        listCampaigns(),
+        listLeads(),
+        listTemplates(),
+        listKnowledge(),
+        listAgents(),
+      ]);
       setCampaigns(c);
       setLeads(l);
       setTemplates(t);
       setKnowledge(k);
+      setAgents(a);
     } catch (e) {
       tell(String(e));
     }
@@ -143,6 +154,7 @@ export function Shell() {
     setDrawer(undefined);
     setEditingTemplate(undefined);
     setEditingKnowledge(undefined);
+    setEditingAgent(undefined);
   };
 
   const openCampaign = (campaign: Campaign) => {
@@ -204,6 +216,10 @@ export function Shell() {
               favourites={favourites}
               onToggleFavourite={toggleFavourite}
               onOpenCanvas={openCampaign}
+              onOpenDrafts={(campaign) => {
+                setDraftsCampaignId(campaign.id);
+                setPage("Drafts");
+              }}
               onDelete={removeCampaign}
               tell={tell}
             />
@@ -232,7 +248,20 @@ export function Shell() {
               }}
             />
           )}
-          {page === "Agents" && <Agents open={setDrawer} />}
+          {page === "Agents" && (
+            <Agents
+              agents={agents}
+              open={setDrawer}
+              onEdit={(agent) => {
+                setEditingAgent(agent);
+                setDrawer("agent");
+              }}
+              tell={tell}
+            />
+          )}
+          {page === "Drafts" && draftsCampaignId && (
+            <Drafts campaignId={draftsCampaignId} tell={tell} onBack={() => setPage("Campaigns")} />
+          )}
           {page === "Canvas" && (
             <CampaignCanvas
               campaigns={campaigns}
@@ -252,7 +281,9 @@ export function Shell() {
                 <TemplateDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} template={editingTemplate} />
               )}
               {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
-              {drawer === "agent" && <AgentDrawer tell={tell} />}
+              {drawer === "agent" && (
+                <AgentDrawer close={closeDrawer} agent={editingAgent} reload={load} tell={tell} />
+              )}
               {drawer === "knowledge" && (
                 <KnowledgeDrawer close={closeDrawer} entry={editingKnowledge} reload={load} tell={tell} />
               )}

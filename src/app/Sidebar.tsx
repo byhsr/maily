@@ -45,8 +45,8 @@ export function Sidebar({
   notifications,
 }: SidebarProps) {
   const rail = collapsed && !mobile;
-  // The canvas is reached from Campaigns, so keep Campaigns lit while it is open.
-  const active = page === "Canvas" ? "Campaigns" : page;
+  // The canvas and draft review are reached from Campaigns, so keep it lit.
+  const active = page === "Canvas" || page === "Drafts" ? "Campaigns" : page;
   const go = (target: string) => {
     onNavigate(target);
     if (mobile) onClose();
