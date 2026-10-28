@@ -1,16 +1,19 @@
 import type { Node } from "@xyflow/react";
-import type { LeadList, Template } from "../lib/types";
+import type { LeadList, LlmModel, Template } from "../lib/types";
+import { KNOWLEDGE_CATEGORIES } from "../lib/knowledge";
+import { ModelPicker } from "../ui/ModelPicker";
 import { ACTION_KINDS, CONDITION_KINDS, type CampaignNodeData } from "./graph";
 
 type InspectorProps = {
   node: Node<CampaignNodeData>;
   templates: Template[];
   lists: LeadList[];
+  catalog: LlmModel[];
   onChange: (patch: Record<string, unknown>) => void;
   onDelete: () => void;
 };
 
-export function Inspector({ node, templates, lists, onChange, onDelete }: InspectorProps) {
+export function Inspector({ node, templates, lists, catalog, onChange, onDelete }: InspectorProps) {
   const { nodeType, config, label } = node.data;
 
   return (
@@ -68,6 +71,60 @@ export function Inspector({ node, templates, lists, onChange, onDelete }: Inspec
             onChange={(e) => onChange({ minutes: Number(e.target.value) })}
           />
         </label>
+      )}
+      {nodeType === "classifier" && (
+        <>
+          <label>
+            Model
+            <ModelPicker
+              value={String(config.model ?? "")}
+              onChange={(value) => onChange({ model: value })}
+              catalog={catalog}
+              placeholder="Uses the classification model"
+            />
+          </label>
+          <label>
+            Judging guidance
+            <textarea
+              value={String(config.instruction ?? "")}
+              onChange={(e) => onChange({ instruction: e.target.value })}
+              placeholder="Anything this campaign should treat as positive, or refuse to call positive."
+            />
+          </label>
+          <label>
+            Minimum confidence · {Number(config.min_confidence ?? 0.6).toFixed(2)}
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={Number(config.min_confidence ?? 0.6)}
+              onChange={(e) => onChange({ min_confidence: Number(e.target.value) })}
+            />
+          </label>
+          <p>Below this the lead is paused for review instead of being routed on a guess.</p>
+          <span className="cv-label">Knowledge this node may read</span>
+          <div className="cv-chips">
+            {KNOWLEDGE_CATEGORIES.map((entry) => {
+              const picked = Array.isArray(config.knowledge) && config.knowledge.includes(entry.id);
+              return (
+                <button
+                  key={entry.id}
+                  className={picked ? "cv-chip on" : "cv-chip"}
+                  onClick={() =>
+                    onChange({
+                      knowledge: picked
+                        ? (config.knowledge as string[]).filter((id) => id !== entry.id)
+                        : [...((config.knowledge as string[]) ?? []), entry.id],
+                    })
+                  }
+                >
+                  {entry.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
       )}
       {nodeType === "condition" && (
         <label>

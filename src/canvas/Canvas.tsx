@@ -20,11 +20,12 @@ import "@xyflow/react/dist/style.css";
 import {
   launchCampaign,
   listLeadLists,
+  listOpenrouterModels,
   loadCampaignGraph,
   pauseCampaign,
   saveCampaignGraph,
 } from "../lib/api";
-import type { Campaign, LeadList, NodeType, Template } from "../lib/types";
+import type { Campaign, LeadList, LlmModel, NodeType, Template } from "../lib/types";
 import {
   NODE_META,
   PALETTE,
@@ -110,11 +111,15 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   const [running, setRunning] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [lists, setLists] = useState<LeadList[]>([]);
+  const [catalog, setCatalog] = useState<LlmModel[]>([]);
 
   useEffect(() => {
     listLeadLists()
       .then(setLists)
       .catch(() => setLists([]));
+    listOpenrouterModels()
+      .then(setCatalog)
+      .catch(() => setCatalog([]));
   }, []);
 
   const refresh = useCallback(
@@ -327,6 +332,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
                 node={selectedNode}
                 templates={templates}
                 lists={lists}
+                catalog={catalog}
                 onChange={(patch) => updateConfig(selectedNode.id, patch)}
                 onDelete={deleteSelected}
               />

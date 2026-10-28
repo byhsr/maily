@@ -20,11 +20,38 @@ export const NODE_META: Record<NodeType, { label: string; branches?: boolean }> 
   email: { label: "Email" },
   delay: { label: "Delay" },
   condition: { label: "Condition", branches: true },
+  classifier: { label: "Reply Classifier" },
   action: { label: "Action" },
   end: { label: "End" },
 };
 
-export const PALETTE: NodeType[] = ["audience", "email", "delay", "condition", "action", "end"];
+export const PALETTE: NodeType[] = ["audience", "email", "delay", "condition", "classifier", "action", "end"];
+
+/** The five labels a Reply Classifier judges a reply into, each its own port. */
+export const CLASSIFIER_PORTS = [
+  { id: "positive", label: "Positive" },
+  { id: "negative", label: "Negative" },
+  { id: "question", label: "Question" },
+  { id: "ooo", label: "Out of office" },
+  { id: "unsubscribe", label: "Unsubscribe" },
+] as const;
+
+const ONE_OUT = [{ id: "out", label: "" }];
+
+/**
+ * Output ports per node type. The handle id becomes the edge label, which is how
+ * the runner knows which branch to take.
+ */
+export const NODE_PORTS: Record<NodeType, { target: boolean; out: { id: string; label: string }[] }> = {
+  audience: { target: false, out: ONE_OUT },
+  start: { target: false, out: ONE_OUT },
+  email: { target: true, out: ONE_OUT },
+  delay: { target: true, out: ONE_OUT },
+  condition: { target: true, out: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+  classifier: { target: true, out: CLASSIFIER_PORTS.map((port) => ({ ...port })) },
+  action: { target: true, out: ONE_OUT },
+  end: { target: false, out: [] },
+};
 
 export const CONDITION_KINDS = [
   ["replied", "Replied"],
@@ -63,6 +90,10 @@ export function summarize(nodeType: NodeType, config: Record<string, unknown>, t
       return `Wait ${formatMinutes(Number(config.minutes ?? 0))}`;
     case "condition":
       return config.kind === "interested" ? "Reply was positive?" : "Replied?";
+    case "classifier": {
+      const model = String(config.model ?? "").trim();
+      return model ? model : "Uses the classification model";
+    }
     case "action":
       return String(config.tag ?? config.kind ?? "notify");
     case "end":
@@ -133,6 +164,8 @@ export function defaultConfig(nodeType: NodeType): Record<string, unknown> {
       return { minutes: 1440 };
     case "condition":
       return { kind: "replied" };
+    case "classifier":
+      return { model: "", instruction: "", knowledge: [], min_confidence: 0.6 };
     case "action":
       return { kind: "notify" };
     case "end":

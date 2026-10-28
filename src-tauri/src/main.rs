@@ -672,6 +672,13 @@ async fn set_campaign_status(
 /// The categories the knowledge base understands. Mirrored in src/lib/knowledge.ts.
 const KNOWLEDGE_CATEGORIES: [&str; 7] = ["offer", "icp", "style", "proof", "objection", "product", "other"];
 
+/// Edge labels the schema accepts: the generic ones, the Condition branches, and
+/// the five Reply Classifier ports.
+const EDGE_LABELS: [&str; 8] = ["next", "yes", "no", "positive", "negative", "question", "ooo", "unsubscribe"];
+
+/// The five labels a classifier node can produce. Mirrored in src/canvas/graph.ts.
+const CLASSIFIER_LABELS: [&str; 5] = ["positive", "negative", "question", "ooo", "unsubscribe"];
+
 #[tauri::command]
 async fn save_knowledge(state: State<'_, AppState>, input: KnowledgeInput) -> Result<String> {
     let category = input.category.trim().to_lowercase();
@@ -1663,7 +1670,7 @@ async fn save_campaign_graph(
         .await
         .map_err(err)?;
     for n in &nodes {
-        if !["start", "audience", "email", "delay", "condition", "action", "end"].contains(&n.node_type.as_str()) {
+        if !["start", "audience", "email", "delay", "condition", "action", "classifier", "end"].contains(&n.node_type.as_str()) {
             return Err(format!("Unknown node type: {}", n.node_type));
         }
         sqlx::query("INSERT INTO campaign_nodes(id,campaign_id,type,config_json,x,y) VALUES(?,?,?,?,?,?)")
@@ -1678,7 +1685,7 @@ async fn save_campaign_graph(
             .map_err(err)?;
     }
     for e in &edges {
-        let label = if ["next", "yes", "no"].contains(&e.label.as_str()) {
+        let label = if EDGE_LABELS.contains(&e.label.as_str()) {
             e.label.clone()
         } else {
             "next".to_string()
@@ -2067,6 +2074,16 @@ async fn graph_issues(db: &SqlitePool, campaign_id: &str) -> Result<Vec<(String,
                 ));
             }
         }
+        if node_type == "classifier"
+            && !edges
+                .iter()
+                .any(|(from, _, label)| from == id && CLASSIFIER_LABELS.contains(&label.as_str()))
+        {
+            issues.push((
+                format!("Classifier node {} has no labelled branch", &id[..8.min(id.len())]),
+                Some(id.clone()),
+            ));
+        }
     }
     if cycle_without_delay(&nodes, &edges) {
         issues.push(("Graph has a cycle that no Delay breaks".to_string(), None));
@@ -2112,7 +2129,9 @@ fn cycle_without_delay(nodes: &[(String, String)], edges: &[(String, String, Str
 }
 async fn process_due(st: &AppState) -> Result<()> {
     // Walk every active lead one node forward toward the end of its campaign graph.
-    let leads = sqlx::query("SELECT cl.campaign_id, cl.lead_id, cl.current_node_id, cl.entered_node_at, cl.account_id FROM campaign_leads cl JOIN campaigns c ON c.id=cl.campaign_id WHERE cl.state='active' AND c.status='active' AND c.approved_at IS NOT NULL AND cl.current_node_id IS NOT NULL LIMIT 12")
+    // Leads parked on a classifier are excluded: a reply is what moves them, and
+    // polling them here would starve the rest of the queue.
+    let leads = sqlx::query("SELECT cl.campaign_id, cl.lead_id, cl.current_node_id, cl.entered_node_at, cl.account_id FROM campaign_leads cl JOIN campaigns c ON c.id=cl.campaign_id WHERE cl.state='active' AND c.status='active' AND c.approved_at IS NOT NULL AND cl.current_node_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM campaign_nodes n WHERE n.id=cl.current_node_id AND n.type='classifier') ORDER BY cl.entered_node_at ASC LIMIT 12")
         .fetch_all(&st.db)
         .await
         .map_err(err)?;
@@ -2128,6 +2147,105 @@ async fn process_due(st: &AppState) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Judges one reply into the five fixed labels. Anything the model cannot answer
+/// cleanly comes back as `needs_review`, and every attempt is recorded.
+async fn judge_reply(
+    st: &AppState,
+    campaign_id: &str,
+    lead_id: &str,
+    node_id: &str,
+    message_id: Option<&str>,
+    config: &Value,
+    text: &str,
+) -> Result<(String, f64, String)> {
+    let model = match config["model"].as_str().filter(|value| !value.trim().is_empty()) {
+        Some(value) => value.trim().to_string(),
+        None => model_for(&st.db, "classifier_model").await,
+    };
+    let categories: Vec<String> = config["knowledge"]
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|value| value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut system = String::from(
+        "You judge replies to cold email. Return strict JSON {\"label\":\"...\",\"confidence\":0.0,\"rationale\":\"...\"}. \
+         Use exactly one label: \
+         positive = wants to talk, or asked to be contacted; \
+         negative = not interested, or asked to stop; \
+         question = asked something that needs a real answer; \
+         ooo = automated out-of-office or delivery notice; \
+         unsubscribe = explicitly opted out or asked to be removed. \
+         Never invent intent that is not present in the reply.",
+    );
+    if let Some(instruction) = config["instruction"].as_str().filter(|value| !value.trim().is_empty()) {
+        system.push_str(&format!("\n\nOperator guidance: {}", instruction.trim()));
+    }
+    let knowledge = knowledge_context(&st.db, &categories).await;
+    if !knowledge.is_empty() {
+        system.push_str(&format!("\n\nKnowledge base:\n{knowledge}"));
+    }
+
+    let mut label = "needs_review".to_string();
+    let mut confidence = 0.0f64;
+    let mut rationale = String::new();
+    let mut raw = json!({});
+    match llm_json(
+        st,
+        &model,
+        Some(&system),
+        &format!("Reply:\n{}", text.chars().take(6000).collect::<String>()),
+        60,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            raw = outcome.value.clone();
+            let candidate = outcome.value["label"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if CLASSIFIER_LABELS.contains(&candidate.as_str()) {
+                label = candidate;
+                confidence = outcome.value["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0);
+            } else {
+                rationale = format!("The model returned an unusable label: {candidate}");
+            }
+            if let Some(note) = outcome.value["rationale"].as_str() {
+                if !note.trim().is_empty() {
+                    rationale = note.trim().to_string();
+                }
+            }
+        }
+        Err(e) => {
+            rationale = e;
+        }
+    }
+
+    sqlx::query("INSERT INTO reply_judgements(id,campaign_id,lead_id,message_id,node_id,model,label,confidence,rationale,raw_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        .bind(id())
+        .bind(campaign_id)
+        .bind(lead_id)
+        .bind(message_id)
+        .bind(node_id)
+        .bind(&model)
+        .bind(&label)
+        .bind(confidence)
+        .bind(&rationale)
+        .bind(raw.to_string())
+        .bind(now())
+        .execute(&st.db)
+        .await
+        .map_err(err)?;
+
+    Ok((label, confidence, rationale))
 }
 
 async fn advance_lead(
@@ -2179,6 +2297,70 @@ async fn advance_lead(
                         .map_err(err)?;
                     return Err(e);
                 }
+            }
+        }
+        "classifier" => {
+            // A reply is what drives this node, so it was resumed by store_message.
+            let lead_email: String = sqlx::query_scalar("SELECT email FROM leads WHERE id=?")
+                .bind(lead_id)
+                .fetch_one(&st.db)
+                .await
+                .map_err(err)?;
+            let message = sqlx::query("SELECT id,subject,raw_excerpt FROM inbox_messages WHERE from_email=? ORDER BY received_at DESC LIMIT 1")
+                .bind(&lead_email)
+                .fetch_optional(&st.db)
+                .await
+                .map_err(err)?;
+            let Some(message) = message else {
+                return Ok(());
+            };
+            let text = format!(
+                "{} {}",
+                message.get::<Option<String>, _>("subject").unwrap_or_default(),
+                message.get::<Option<String>, _>("raw_excerpt").unwrap_or_default()
+            );
+            sqlx::query("UPDATE campaign_leads SET last_reply_at=COALESCE(last_reply_at,?) WHERE campaign_id=? AND lead_id=?")
+                .bind(now())
+                .bind(campaign_id)
+                .bind(lead_id)
+                .execute(&st.db)
+                .await
+                .map_err(err)?;
+
+            let message_id: String = message.get("id");
+            let (label, confidence, _) =
+                judge_reply(st, campaign_id, lead_id, node_id, Some(&message_id), &config, &text).await?;
+            let minimum = config["min_confidence"].as_f64().unwrap_or(0.6);
+            if label == "needs_review" || confidence < minimum {
+                // Guessing would route a real prospect down the wrong branch.
+                sqlx::query("UPDATE leads SET status='needs_attention',updated_at=? WHERE id=?")
+                    .bind(now())
+                    .bind(lead_id)
+                    .execute(&st.db)
+                    .await
+                    .map_err(err)?;
+                sqlx::query("UPDATE campaign_leads SET state='paused' WHERE campaign_id=? AND lead_id=?")
+                    .bind(campaign_id)
+                    .bind(lead_id)
+                    .execute(&st.db)
+                    .await
+                    .map_err(err)?;
+                log(&st.db, "warn", "classifier_review", lead_id).await;
+                return Ok(());
+            }
+
+            let target: Option<String> = sqlx::query_scalar(
+                "SELECT to_node FROM campaign_edges WHERE campaign_id=? AND from_node=? AND label=? LIMIT 1",
+            )
+            .bind(campaign_id)
+            .bind(node_id)
+            .bind(&label)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?;
+            match target {
+                Some(next) => enter_node(st, campaign_id, lead_id, &next).await?,
+                None => move_next(st, campaign_id, lead_id, node_id).await?,
             }
         }
         "condition" => {
@@ -2636,7 +2818,7 @@ async fn stop_lead_sequence(db: &SqlitePool, email: &str) -> Result<()> {
             .execute(db)
             .await
             .map_err(err)?;
-        sqlx::query("UPDATE campaign_leads SET state='paused' WHERE lead_id=? AND state='active'")
+        sqlx::query("UPDATE campaign_leads SET state='paused' WHERE lead_id=? AND state='active' AND (current_node_id IS NULL OR current_node_id NOT IN (SELECT id FROM campaign_nodes WHERE type='classifier'))")
             .bind(&lead_id)
             .execute(db)
             .await
@@ -2646,7 +2828,37 @@ async fn stop_lead_sequence(db: &SqlitePool, email: &str) -> Result<()> {
     Ok(())
 }
 
-async fn store_message(db: &SqlitePool, account_id: &str, provider_message_id: &str, from: &str, subject: &str, received_at: &str, excerpt: &str) -> Result<usize> {
+/// A reply is what moves a lead out of a classifier node, so classifiers are
+/// driven by arrivals rather than by the scheduler.
+async fn resume_classifiers(st: &AppState, email: &str) {
+    let rows = sqlx::query("SELECT cl.campaign_id,cl.lead_id,cl.current_node_id,cl.entered_node_at,cl.account_id FROM campaign_leads cl JOIN campaigns c ON c.id=cl.campaign_id JOIN campaign_nodes n ON n.id=cl.current_node_id WHERE n.type='classifier' AND cl.state='active' AND c.status='active' AND c.approved_at IS NOT NULL AND cl.lead_id=(SELECT id FROM leads WHERE email=?)")
+        .bind(email)
+        .fetch_all(&st.db)
+        .await;
+    let Ok(rows) = rows else { return };
+    for row in rows {
+        let campaign_id: String = row.get("campaign_id");
+        let lead_id: String = row.get("lead_id");
+        let node_id: Option<String> = row.get("current_node_id");
+        let entered_at: Option<String> = row.get("entered_node_at");
+        let account_id: Option<String> = row.get("account_id");
+        let Some(node_id) = node_id else { continue };
+        if let Err(e) = advance_lead(
+            st,
+            &campaign_id,
+            &lead_id,
+            &node_id,
+            entered_at.as_deref(),
+            account_id.as_deref(),
+        )
+        .await
+        {
+            log(&st.db, "warn", "classifier_advance", &format!("{lead_id}: {e}")).await;
+        }
+    }
+}
+
+async fn store_message(st: &AppState, account_id: &str, provider_message_id: &str, from: &str, subject: &str, received_at: &str, excerpt: &str) -> Result<usize> {
     let email = extract_email(from);
     let inserted = sqlx::query("INSERT OR IGNORE INTO inbox_messages(id,account_id,provider_message_id,from_email,subject,received_at,raw_excerpt,read_flag) VALUES(?,?,?,?,?,?,?,0)")
         .bind(id())
@@ -2656,12 +2868,13 @@ async fn store_message(db: &SqlitePool, account_id: &str, provider_message_id: &
         .bind(subject)
         .bind(received_at)
         .bind(excerpt)
-        .execute(db)
+        .execute(&st.db)
         .await
         .map_err(err)?
         .rows_affected();
     if inserted > 0 {
-        stop_lead_sequence(db, &email).await?;
+        stop_lead_sequence(&st.db, &email).await?;
+        resume_classifiers(st, &email).await;
     }
     Ok(inserted as usize)
 }
@@ -2727,7 +2940,7 @@ async fn sync_inbox(state: State<'_, AppState>, account_id: Option<String>) -> R
                 let received_at = chrono::DateTime::from_timestamp_millis(received)
                     .map(|d| d.to_rfc3339())
                     .unwrap_or_else(now);
-                total += store_message(&state.db, &id, mid, &header("From"), &header("Subject"), &received_at, detail["snippet"].as_str().unwrap_or("")).await?;
+                total += store_message(state.inner(), &id, mid, &header("From"), &header("Subject"), &received_at, detail["snippet"].as_str().unwrap_or("")).await?;
             }
         } else {
             let list: Value = state
@@ -2750,7 +2963,7 @@ async fn sync_inbox(state: State<'_, AppState>, account_id: Option<String>) -> R
                 let from = message["from"]["emailAddress"]["address"].as_str().unwrap_or("");
                 let received_at = message["receivedDateTime"].as_str().unwrap_or("").to_string();
                 total += store_message(
-                    &state.db,
+                    state.inner(),
                     &id,
                     mid,
                     from,

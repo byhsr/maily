@@ -156,7 +156,7 @@ export type DashboardStats = {
   activeCampaigns: number;
 };
 
-export type NodeType = "audience" | "start" | "email" | "delay" | "condition" | "action" | "end";
+export type NodeType = "audience" | "start" | "email" | "delay" | "condition" | "classifier" | "action" | "end";
 export type EdgeLabel = "next" | "yes" | "no";
 
 export type GraphNode = {
