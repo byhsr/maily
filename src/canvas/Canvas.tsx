@@ -27,6 +27,7 @@ import type { Campaign, Lead, NodeType, Template } from "../lib/types";
 import { Input } from "../ui/Input";
 import {
   NODE_META,
+  PALETTE,
   defaultConfig,
   defaultFlow,
   fromFlow,
@@ -39,8 +40,7 @@ import {
 } from "./graph";
 import { Inspector } from "./Inspector";
 import { NodeCard } from "./NodeCard";
-import { Palette } from "./Palette";
-import { canvasVars, theme } from "./theme";
+import { canvasVars, nodeAccent, theme } from "./theme";
 
 const nodeTypes = { campaign: NodeCard };
 
@@ -278,13 +278,15 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
           </i>
           maily
         </span>
-        <button className="cv-pill on">Workflow</button>
-        <button className="cv-pill" onClick={() => setPath([])}>
-          Campaign
-        </button>
-        <button className="cv-pill" onClick={() => tell("Wire a node to its ports, then Run.")}>
-          Help
-        </button>
+        <span className="cv-divider" />
+        <div className="cv-nodes">
+          {PALETTE.map((type) => (
+            <button className="cv-node-add" key={type} onClick={() => addNode(type)} title={`Add ${NODE_META[type].label}`}>
+              <i className="cv-dot" style={{ background: nodeAccent(type) }} />
+              {NODE_META[type].label}
+            </button>
+          ))}
+        </div>
         <span className="cv-spacer" />
         {creating ? (
           <>
@@ -376,7 +378,6 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
 
       {campaignId ? (
         <div className="cv-wrap">
-          <Palette onAdd={addNode} />
           <div className="cv-flow">
             <ReactFlow
               nodes={nodes}
@@ -426,12 +427,11 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, leads,
         </div>
       ) : (
         <div className="cv-wrap">
-          <div className="cv-panel">
-            <h4>Add node</h4>
-            <p>Name a campaign in the bar above to start building.</p>
-          </div>
           <div className="cv-flow" />
-          <div className="cv-panel" />
+          <div className="cv-panel">
+            <h4>Get started</h4>
+            <p>Name a campaign in the bar above, then add nodes from the palette to build the sequence.</p>
+          </div>
         </div>
       )}
     </section>

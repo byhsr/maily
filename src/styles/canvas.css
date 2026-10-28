@@ -30,16 +30,53 @@
   position: relative;
   z-index: 5;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  align-self: center;
-  min-width: min(920px, 100%);
+  gap: 8px;
+  width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--cv-card-line);
-  border-radius: 999px;
+  border-radius: 22px;
   background: rgb(22 22 24 / 0.88);
   backdrop-filter: blur(10px);
   box-shadow: 0 12px 30px rgb(0 0 0 / 0.5);
+}
+
+.cv-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: var(--cv-card-line);
+}
+
+/* Node palette, docked in the top bar. */
+.cv-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.cv-node-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--cv-card-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--cv-ink);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cv-node-add:hover {
+  border-color: var(--cv-card-line-hover);
+  background: rgb(255 255 255 / 0.05);
+}
+
+.cv-node-add i {
+  flex: none;
 }
 
 .cv-back {
@@ -165,7 +202,7 @@
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 176px 1fr 260px;
+  grid-template-columns: 1fr 260px;
   gap: 12px;
   align-items: stretch;
   flex: 1;
@@ -451,20 +488,6 @@ textarea.cv-inset {
   line-height: 1.5;
 }
 
-.cv-panel button.cv-add {
-  justify-content: flex-start;
-  padding: 8px 10px;
-  border: 1px dashed rgb(255 255 255 / 0.14);
-  border-radius: 9px;
-  background: transparent;
-  color: var(--cv-ink);
-  font-size: 12px;
-}
-
-.cv-panel button.cv-add:hover {
-  background: rgb(255 255 255 / 0.05);
-}
-
 .cv-panel label {
   display: flex;
   flex-direction: column;
@@ -624,9 +647,7 @@ textarea.cv-inset {
     padding: 14px;
   }
 
-  .cv-topbar {
-    min-width: 0;
-    width: 100%;
-    flex-wrap: wrap;
+  .cv-wrap {
+    grid-template-columns: 1fr;
   }
 }
