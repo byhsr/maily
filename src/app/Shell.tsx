@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { deleteCampaign, listCampaigns, listChannels, listLeads, listTemplates } from "../lib/api";
+import { deleteCampaign, listCampaigns, listChannels, listLeads, listTemplates, saveCampaign } from "../lib/api";
 import type { Campaign, Lead, Template } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
@@ -18,6 +18,7 @@ import { SettingsDrawer } from "../drawers/SettingsDrawer";
 import { Sidebar } from "./Sidebar";
 import { Titlebar } from "./Titlebar";
 import { NavContext } from "./nav";
+import { Prompt } from "../ui/Prompt";
 
 function readFavourites(): string[] {
   try {
@@ -55,6 +56,7 @@ export function Shell() {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobile, setMobile] = useState(isNarrow);
   const [navOpen, setNavOpen] = useState(false);
+  const [naming, setNaming] = useState(false);
 
   const tell = (message: string) => {
     setNote(message);
@@ -142,8 +144,17 @@ export function Shell() {
     setPage("Canvas");
   };
 
-  const startNewCampaign = () => {
-    setCanvasId(undefined);
+  const startNewCampaign = () => setNaming(true);
+
+  const createCampaign = async (name: string) => {
+    const created = await saveCampaign({
+      name,
+      template_id: null,
+      mode: "draft",
+      schedule: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
+    });
+    await load();
+    setCanvasId(created);
     setPage("Canvas");
   };
 
@@ -213,7 +224,6 @@ export function Shell() {
               templates={templates}
               tell={tell}
               onSelect={setCanvasId}
-              reload={load}
               onBack={() => setPage("Campaigns")}
             />
           )}
@@ -236,6 +246,17 @@ export function Shell() {
             <Check />
             {note}
           </div>
+        )}
+        {naming && (
+          <Prompt
+            title="New campaign"
+            placeholder="Q3 founder outreach"
+            onSubmit={(name) => {
+              setNaming(false);
+              createCampaign(name).catch((e) => tell(String(e)));
+            }}
+            onCancel={() => setNaming(false)}
+          />
         )}
       </div>
     </NavContext.Provider>

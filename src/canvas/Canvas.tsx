@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Mail, Play, Plus } from "lucide-react";
+import { ArrowLeft, Mail, Play } from "lucide-react";
 import {
   Background,
   BackgroundVariant,
@@ -21,11 +21,9 @@ import {
   launchCampaign,
   loadCampaignGraph,
   pauseCampaign,
-  saveCampaign,
   saveCampaignGraph,
 } from "../lib/api";
 import type { Campaign, NodeType, Template } from "../lib/types";
-import { Input } from "../ui/Input";
 import {
   NODE_META,
   PALETTE,
@@ -100,14 +98,11 @@ type CampaignCanvasProps = {
   templates: Template[];
   tell: (message: string) => void;
   onSelect: (campaignId?: string) => void;
-  reload: () => void;
   onBack: () => void;
 };
 
-export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, onSelect, reload, onBack }: CampaignCanvasProps) {
+export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, onSelect, onBack }: CampaignCanvasProps) {
   const [campaignId, setCampaignId] = useState(initialCampaignId ?? "");
-  const [creating, setCreating] = useState(!initialCampaignId);
-  const [draftName, setDraftName] = useState("");
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<CampaignNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selected, setSelected] = useState<string>();
@@ -134,48 +129,13 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
   }, [campaignId, refresh, tell]);
 
   useEffect(() => {
-    if (initialCampaignId) {
-      setCampaignId(initialCampaignId);
-      setCreating(false);
-    }
+    if (initialCampaignId) setCampaignId(initialCampaignId);
   }, [initialCampaignId]);
 
   useEffect(() => {
     const current = campaigns.find((c) => c.id === campaignId);
     setRunning(current?.status === "active");
   }, [campaigns, campaignId]);
-
-  const cancelCreating = () => {
-    const fallback = initialCampaignId ?? campaigns[0]?.id ?? "";
-    setCreating(false);
-    setDraftName("");
-    setCampaignId(fallback);
-    onSelect(fallback);
-  };
-
-  const createCampaign = async () => {
-    const name = draftName.trim();
-    if (!name) {
-      tell("Name the campaign first");
-      return;
-    }
-    try {
-      const created = await saveCampaign({
-        name,
-        template_id: null,
-        mode: "draft",
-        schedule: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
-      });
-      setCreating(false);
-      setDraftName("");
-      setCampaignId(created);
-      onSelect(created);
-      reload();
-      tell("Campaign created — add your first node");
-    } catch (e) {
-      tell(String(e));
-    }
-  };
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -300,29 +260,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
           </div>
         )}
         <span className="cv-spacer" />
-        {creating ? (
-          <>
-            <Input
-              className="cv-inset"
-              value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") createCampaign();
-              }}
-              placeholder="Campaign name"
-              autoFocus
-            />
-            <button className="cv-run" onClick={createCampaign}>
-              <Plus />
-              Create
-            </button>
-            {campaigns.length > 0 && (
-              <button className="cv-pill" onClick={cancelCreating}>
-                Cancel
-              </button>
-            )}
-          </>
-        ) : (
+        {campaignId && (
           <>
             <select
               className="cv-pill"
@@ -343,7 +281,7 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
                 Pause
               </button>
             ) : (
-              <button className="cv-run" onClick={runLaunch} disabled={!campaignId} title="Validate, then start sending">
+              <button className="cv-run" onClick={runLaunch} title="Validate, then start sending">
                 <Play />
                 Run
               </button>
@@ -391,8 +329,8 @@ export function CampaignCanvas({ campaigns, initialCampaignId, templates, tell, 
           <div className="cv-flow" />
           <div className="cv-side">
             <div className="cv-panel">
-              <h4>Get started</h4>
-              <p>Name a campaign in the bar above, then drag nodes from the palette onto the canvas.</p>
+              <h4>No campaign open</h4>
+              <p>Create a campaign from the Campaigns page to start building its sequence.</p>
             </div>
           </div>
         </div>

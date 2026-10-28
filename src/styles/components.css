@@ -792,6 +792,21 @@ button svg {
   font-weight: 600;
 }
 
+.prompt-input {
+  width: 100%;
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  outline: none;
+}
+
+.prompt-input:focus {
+  border-color: var(--ink-3);
+}
+
 .confirm-card p {
   margin: 0 0 18px;
   color: var(--ink-2);
@@ -823,6 +838,16 @@ button svg {
   border-color: transparent;
   background: var(--bad);
   color: var(--paper);
+}
+
+.confirm-actions button.primary {
+  border-color: transparent;
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.confirm-actions button:disabled {
+  opacity: 0.45;
 }
 
 /* ---------- Page headers (each page owns its own) ---------- */
