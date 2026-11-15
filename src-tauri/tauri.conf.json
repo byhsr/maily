@@ -11,5 +11,5 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMzMjVBRUY4RjRDRjIwQUIKUldTcklNLzArSzRsTXhWdmV5WFNMVDQ3R29aSE5NcVJkN0RQR3dBNjV6dE5nZzRoWjRwb1VPNHAK"
     }
   },
-  "bundle": { "active": true, "targets": "all", "icon": [], "createUpdaterArtifacts": true }
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/32x32.png", "icons/64x64.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"], "createUpdaterArtifacts": true }
 }
