@@ -5,5 +5,11 @@
   "identifier": "com.maily.desktop",
   "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1421", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Maily", "width": 1280, "height": 820, "minWidth": 980, "minHeight": 620, "decorations": false }], "security": { "csp": "default-src 'self'; connect-src 'self' https://accounts.google.com https://oauth2.googleapis.com https://graph.microsoft.com https://openrouter.ai http://127.0.0.1:*; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com" } },
-  "bundle": { "active": true, "targets": "all", "icon": [] }
+  "plugins": {
+    "updater": {
+      "endpoints": ["https://github.com/byhsr/maily/releases/latest/download/latest.json"],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMzMjVBRUY4RjRDRjIwQUIKUldTcklNLzArSzRsTXhWdmV5WFNMVDQ3R29aSE5NcVJkN0RQR3dBNjV6dE5nZzRoWjRwb1VPNHAK"
+    }
+  },
+  "bundle": { "active": true, "targets": "all", "icon": [], "createUpdaterArtifacts": true }
 }

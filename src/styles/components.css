@@ -3595,6 +3595,19 @@ hr {
   border-color: var(--text-faint);
 }
 
+/* A release waiting to be installed. The only chrome the updater ever shows. */
+.updatenotice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
 .fufrules {
   display: flex;
   flex-wrap: wrap;

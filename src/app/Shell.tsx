@@ -22,6 +22,7 @@ import { Sidebar } from "./Sidebar";
 import { Titlebar } from "./Titlebar";
 import { NavContext } from "./nav";
 import { Prompt } from "../ui/Prompt";
+import { UpdateNotice } from "../ui/UpdateNotice";
 
 /** Where the app is, as one value: a page plus whatever that page needs to render. */
 type Location = { page: string; campaignId?: string; settingsTab?: string; tab?: string; messageId?: string };
@@ -302,6 +303,7 @@ export function Shell() {
   return (
     <NavContext.Provider value={nav}>
       <div className="desktop">
+        <UpdateNotice />
         <Titlebar
           collapsed={collapsed && !mobile}
           onToggle={toggleSidebar}

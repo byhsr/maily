@@ -7,3 +7,15 @@ src-tauri/gen/schemas
 *.log
 .DS_Store
 *.local
+
+# Secrets. OAuth client secrets and model keys live in the OS credential vault, never here.
+.env
+.env.*
+# The updater's private signing key. Every install verifies a download against the public key
+# compiled into the app, so this file is the only thing standing between your users and
+# whatever someone else wants them to run. Never commit it.
+*.key
+.tauri/
+
+# Build leftovers.
+*.tsbuildinfo

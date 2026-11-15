@@ -6883,6 +6883,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
+        // In-place updates. The endpoint and the public key live in tauri.conf.json; the
+        // download is verified against that key, so a tampered manifest installs nothing.
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         // Window chrome is owned by the config (decorations: false), so the state
         // plugin must not restore a stale `decorated` value over it, nor restore
         // a maximized frame that would sit over the taskbar.
