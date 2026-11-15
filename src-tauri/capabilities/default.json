@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "opener:allow-open-url",
     "deep-link:default",
     "window-state:default",
     "core:window:allow-minimize",
