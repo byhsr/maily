@@ -11,16 +11,28 @@ npm run tauri dev
 
 For a production bundle, use `npm run tauri build` after installing the platform prerequisites for Tauri v2.
 
-## Required configuration
+## Connecting an email account
 
-1. Create an OAuth desktop/web client in Google Cloud and enable Gmail API, or create an Entra app with delegated `Mail.Send`, `Mail.Read`, and `User.Read` permissions.
-2. Register the redirect URI you enter in Accounts. After authorization, pass the returned `code` and `state` to Maily's `finish_oauth` command (a custom callback/deep-link handler can call this command). Never put client secrets in campaign data.
-3. Install and run Ollama locally for local models, e.g. `ollama pull llama3.2`. Enter models as `ollama:llama3.2`.
-4. Or use OpenRouter for hosted models: paste a key into **Settings → Models**. It is saved through Windows Credential Manager/macOS Keychain/Linux Secret Service via `keyring`, never in SQLite. One key covers the whole model catalog, and each job slot (default, drafting, classification, style) picks its own model.
+The user-facing flow is one click: **Settings → Email accounts → Connect Gmail / Connect Outlook**. Sign-in opens in the system browser and the loopback redirect is captured automatically; nothing else is asked for.
+
+That requires the app to own an OAuth client, set up **once** (by whoever builds or installs Maily), not per user. Gmail and Microsoft will not issue tokens to an unregistered client, so this step cannot be skipped:
+
+1. Create an OAuth *desktop* client in Google Cloud (enable the Gmail API) and/or an Entra app with delegated `Mail.Send`, `Mail.Read`, `User.Read`.
+2. Register the redirect URI `http://127.0.0.1:42813/callback`. Google desktop clients accept any loopback port; for Entra, add it under the *Mobile and desktop applications* platform.
+3. Put the client id (and secret, for Gmail) where Maily expects it — any one of:
+   - **Settings → Email accounts → Advanced → Save for one-click**, which stores it in the OS credential vault;
+   - the `MAILY_GMAIL_CLIENT_ID` / `MAILY_GMAIL_CLIENT_SECRET` / `MAILY_MICROSOFT_CLIENT_ID` / `MAILY_MICROSOFT_CLIENT_SECRET` environment variables.
+
+The redirect URI and the client id/secret fields are only shown under **Advanced**, for using a different OAuth app than the app default. A desktop client secret is not a real secret (Google ships it in binary); it still lives in the credential vault, never SQLite.
+
+## Local and hosted models
+
+1. Install and run Ollama locally for local models, e.g. `ollama pull qwen2.5:3b`. Models are entered as `ollama:<name>`; **Settings → AI models** lists what is installed so you pick from the list instead of typing a name, and no model is assumed by default.
+2. Or use OpenRouter for hosted models: paste a key into **Settings → AI models**. It is saved through Windows Credential Manager/macOS Keychain/Linux Secret Service via `keyring`, never in SQLite. One key covers the whole model catalog, and each job slot (default, drafting, classification, style) picks its own model.
 
 ## Models, knowledge and agents
 
-**Settings → Models** is the only place a model is configured. Every model call routes the same way: `ollama:<name>` goes to the local server, anything else is treated as an OpenRouter model id. "Test connection" sends a real structured request so a bad key fails with the provider's own message rather than silently.
+**Settings → AI models** is the only place a model is configured. Every model call routes the same way: `ollama:<name>` goes to the local server, anything else is treated as an OpenRouter model id. "Test connection" sends a real structured request so a bad key fails with the provider's own message rather than silently.
 
 **Knowledge** holds what the models are allowed to know: offers, ICPs, style, proof points, objections, product detail. Only entries marked *Use in prompts* are sent, and each agent and classifier node chooses which groups it may read. The prompt block is assembled in one place and the editor shows you exactly what a model would receive.
 
