@@ -3,8 +3,10 @@ import { deleteKnowledge, previewKnowledge, saveKnowledge } from "../lib/api";
 import { categoryMeta, KNOWLEDGE_CATEGORIES } from "../lib/knowledge";
 import type { KnowledgeCategory, KnowledgeEntry } from "../lib/types";
 import { Button } from "../ui/Button";
+import { Checkbox } from "../ui/Checkbox";
 import { Confirm } from "../ui/Confirm";
 import { Input } from "../ui/Input";
+import { Select } from "../ui/Select";
 
 type KnowledgeDrawerProps = {
   close: () => void;
@@ -78,13 +80,12 @@ export function KnowledgeDrawer({ close, entry, reload, tell }: KnowledgeDrawerP
       <p>{categoryMeta(category).hint}</p>
       <label>
         Category
-        <select value={category} onChange={(e) => setCategory(e.target.value as KnowledgeCategory)}>
-          {KNOWLEDGE_CATEGORIES.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
+        <Select
+          label="Category"
+          value={category}
+          options={KNOWLEDGE_CATEGORIES.map((item) => ({ value: item.id, label: item.label }))}
+          onChange={(value) => setCategory(value as KnowledgeCategory)}
+        />
       </label>
       <label>
         Title
@@ -103,8 +104,8 @@ export function KnowledgeDrawer({ close, entry, reload, tell }: KnowledgeDrawerP
         <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="saas, series-a (comma separated)" />
       </label>
 
-      <label className="knowtoggle">
-        <input type="checkbox" checked={approved} onChange={(e) => setApproved(e.target.checked)} />
+      <div className="knowtoggle">
+        <Checkbox checked={approved} onChange={setApproved} label="Use in prompts" />
         <span>
           <b>Use in prompts</b>
           <small>
@@ -113,7 +114,7 @@ export function KnowledgeDrawer({ close, entry, reload, tell }: KnowledgeDrawerP
               : "Unapproved entries are stored but never sent to a model."}
           </small>
         </span>
-      </label>
+      </div>
 
       <div className="settingsrow">
         <Button variant="ink" onClick={save} disabled={busy}>

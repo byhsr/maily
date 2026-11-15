@@ -5,8 +5,9 @@ import { agentKindLabel, usageLabel, whenLabel } from "../lib/agents";
 import type { AgentDef, AgentRun } from "../lib/types";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
-import { Topbar } from "../ui/Topbar";
+import { PageHeader } from "../ui/PageHeader";
 
 type AgentsProps = {
   agents: AgentDef[];
@@ -46,8 +47,15 @@ export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
 
   return (
     <>
-      <Topbar
+      <PageHeader
+        title="Agents"
         status={`${agents.length} agent${agents.length === 1 ? "" : "s"}`}
+        tools={
+          <Button variant="secondary" onClick={learnStyle} disabled={busy}>
+            <Sparkles />
+            {busy ? "Analysing…" : "Learn my style"}
+          </Button>
+        }
         action={
           <Button onClick={() => open("agent")}>
             <Plus />New agent
@@ -56,15 +64,6 @@ export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
       />
 
       <section className="sheet">
-        <header>
-          <h2>Agents</h2>
-          <div className="actions">
-            <Button variant="ghost" onClick={learnStyle} disabled={busy}>
-              <Sparkles />
-              {busy ? "Analysing…" : "Learn my style"}
-            </Button>
-          </div>
-        </header>
 
         {agents.length ? (
           <div className="agentgrid">
@@ -86,7 +85,7 @@ export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
                   {typeof agent.runs === "number" && <span>{agent.runs} run{agent.runs === 1 ? "" : "s"}</span>}
                   {!!agent.cost && <span>${agent.cost.toFixed(3)}</span>}
                 </div>
-                <button className="round agentedit" onClick={() => onEdit(agent)} aria-label={`Edit ${agent.name}`}>
+                <button className="btn-icon agentedit" onClick={() => onEdit(agent)} aria-label={`Edit ${agent.name}`}>
                   <Pencil />
                 </button>
               </article>
@@ -98,12 +97,10 @@ export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
       </section>
 
       <section className="sheet">
-        <header>
+        <div className="sectiontitle">
           <h2>Recent runs</h2>
-          <div className="actions">
-            <span className="muted">Newest first · refreshes every few seconds</span>
-          </div>
-        </header>
+          <span>Newest first · refreshes every few seconds</span>
+        </div>
         {runs.length ? (
           <div className="runrows">
             {runs.map((run) => (
@@ -119,7 +116,9 @@ export function Agents({ agents, open, onEdit, tell }: AgentsProps) {
             ))}
           </div>
         ) : (
-          <p className="muted">Nothing has run yet.</p>
+          <Card className="emptycard">
+            <p className="muted">Nothing has run yet.</p>
+          </Card>
         )}
       </section>
     </>

@@ -1,4 +1,5 @@
 import { ChevronDown } from "lucide-react";
+import { Select } from "./Select";
 
 type FilterChipProps = {
   label: string;
@@ -10,6 +11,10 @@ type FilterChipProps = {
   onClick?: () => void;
 };
 
+/**
+ * A filter chip. A filter with choices wears the app's dropdown rather than a native
+ * `<select>` — one dropdown grammar everywhere, and the chip geometry on top of it.
+ */
 export function FilterChip({ label, value, options, onChange, active, disabled, onClick }: FilterChipProps) {
   if (disabled) {
     return (
@@ -24,19 +29,14 @@ export function FilterChip({ label, value, options, onChange, active, disabled, 
 
   if (options && onChange) {
     return (
-      <label className="chip chip-select">
-        <span>
-          {label}: {value}
-        </span>
-        <ChevronDown />
-        <select value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
-          {options.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </select>
-      </label>
+      <Select
+        className="chipselect"
+        prefix={`${label}:`}
+        label={label}
+        value={value ?? options[0]}
+        options={options.map((option) => ({ value: option, label: option }))}
+        onChange={onChange}
+      />
     );
   }
 

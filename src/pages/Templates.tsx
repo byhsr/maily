@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ChevronRight, Plus, Sparkles } from "lucide-react";
 import { seedTemplates } from "../lib/api";
 import type { Template } from "../lib/types";
 import { Button } from "../ui/Button";
+import { Card } from "../ui/Card";
 import { EmptyState } from "../ui/EmptyState";
-import { Topbar } from "../ui/Topbar";
+import { PageHeader } from "../ui/PageHeader";
 
 const PURPOSE_LABEL: Record<string, string> = {
   first_touch: "First touch",
@@ -23,6 +24,8 @@ type TemplatesProps = {
   tell: (message: string) => void;
 };
 
+/** The library of reusable messages. A campaign copies one when it picks it, so nothing
+ *  here is a live reference — which is why this page is a flat list and not a builder. */
 export function Templates({ templates, open, onEdit, reload, tell }: TemplatesProps) {
   const [query, setQuery] = useState("");
 
@@ -37,50 +40,63 @@ export function Templates({ templates, open, onEdit, reload, tell }: TemplatesPr
   };
 
   const q = query.trim().toLowerCase();
-  const shown = templates.filter(
-    (t) => !q || t.name.toLowerCase().includes(q) || t.subject.toLowerCase().includes(q)
+  const shown = useMemo(
+    () =>
+      templates.filter(
+        (template) =>
+          !q ||
+          template.name.toLowerCase().includes(q) ||
+          template.subject.toLowerCase().includes(q) ||
+          template.body.toLowerCase().includes(q)
+      ),
+    [templates, q]
   );
 
   return (
     <>
-      <Topbar
+      <PageHeader
+        title="Templates"
+        status={`${shown.length} message${shown.length === 1 ? "" : "s"}`}
         search={{ value: query, onChange: setQuery, placeholder: "Search templates..." }}
-        status={`${templates.length} template${templates.length === 1 ? "" : "s"}`}
+        tools={
+          templates.length === 0 ? (
+            <Button variant="secondary" onClick={seed}>
+              <Sparkles />Load starters
+            </Button>
+          ) : null
+        }
         action={
           <Button onClick={() => open("template")}>
-            <Plus />New
+            <Plus />New template
           </Button>
         }
       />
 
       <section className="sheet">
-        <header>
-          <h2>Templates</h2>
-          <div className="actions">
-            {templates.length === 0 && (
-              <Button variant="ghost" onClick={seed}>
-                <Sparkles />Load starters
-              </Button>
-            )}
-          </div>
-        </header>
         {shown.length ? (
           <div className="templatecards">
-            {shown.map((t) => (
-              <button key={t.id} onClick={() => onEdit(t)}>
-                <label>{PURPOSE_LABEL[t.purpose] ?? t.purpose}</label>
-                <h3>{t.subject}</h3>
-                <p>{t.body}</p>
-                <span>
-                  {t.name} · Edit <ChevronRight />
+            {shown.map((template) => (
+              <button key={template.id} onClick={() => onEdit(template)}>
+                <div className="seqcardhead">
+                  <i className="chip">{PURPOSE_LABEL[template.purpose] ?? template.purpose}</i>
+                </div>
+                <h3>{template.subject || "(no subject)"}</h3>
+                <p>{template.body || "Empty template"}</p>
+                <span className="seqcardfoot">
+                  {template.name} · Edit <ChevronRight />
                 </span>
               </button>
             ))}
           </div>
         ) : templates.length ? (
-          <p className="muted">No templates match this search.</p>
+          <Card className="emptycard">
+            <p className="muted">No templates match this search.</p>
+          </Card>
         ) : (
-          <EmptyState text="Start from the starter library, or write a template once and reuse it." action={() => open("template")} />
+          <EmptyState
+            text="Write one reusable message, then drop it into any campaign — the campaign keeps its own copy."
+            action={() => open("template")}
+          />
         )}
       </section>
     </>

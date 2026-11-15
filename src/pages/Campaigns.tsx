@@ -3,10 +3,11 @@ import { Plus } from "lucide-react";
 import type { Campaign } from "../lib/types";
 import { Button } from "../ui/Button";
 import { CampaignCard } from "../ui/CampaignCard";
+import { Card } from "../ui/Card";
 import { Confirm } from "../ui/Confirm";
 import { EmptyState } from "../ui/EmptyState";
 import { FilterChip } from "../ui/FilterChip";
-import { Topbar } from "../ui/Topbar";
+import { PageHeader } from "../ui/PageHeader";
 
 const STATUS_OPTIONS = ["All", "Active", "Draft", "Paused"];
 const DATE_OPTIONS = ["Any time", "This week", "This month"];
@@ -16,13 +17,12 @@ type CampaignsProps = {
   onNew: () => void;
   favourites: string[];
   onToggleFavourite: (id: string) => void;
-  onOpenCanvas: (campaign: Campaign) => void;
-  onOpenDrafts: (campaign: Campaign) => void;
+  onOpenCampaign: (campaign: Campaign) => void;
   onDelete: (id: string) => Promise<void>;
   tell: (message: string) => void;
 };
 
-export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCanvas, onOpenDrafts, onDelete, tell }: CampaignsProps) {
+export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onOpenCampaign, onDelete, tell }: CampaignsProps) {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("All");
   const [range, setRange] = useState("Any time");
@@ -42,19 +42,16 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
 
   return (
     <section>
-      <Topbar
-        search={{ value: query, onChange: setQuery, placeholder: "Search campaigns..." }}
+      <PageHeader
+        title="Campaigns"
         status={`${campaigns.length} campaign${campaigns.length === 1 ? "" : "s"}`}
+        search={{ value: query, onChange: setQuery, placeholder: "Search campaigns..." }}
         action={
           <Button onClick={onNew}>
             <Plus />New
           </Button>
         }
       />
-
-      <header className="pagehead">
-        <h2>Campaigns</h2>
-      </header>
 
       <div className="chips">
         <FilterChip label="Status" value={status} options={STATUS_OPTIONS} onChange={setStatus} />
@@ -71,14 +68,15 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
               campaign={campaign}
               favourite={favourites.includes(campaign.id)}
               onToggleFavourite={() => onToggleFavourite(campaign.id)}
-              onOpen={() => onOpenCanvas(campaign)}
-              onDrafts={() => onOpenDrafts(campaign)}
+              onOpen={() => onOpenCampaign(campaign)}
               onDelete={() => setPending(campaign)}
             />
           ))}
         </div>
       ) : campaigns.length ? (
-        <p className="muted">No campaigns match these filters.</p>
+        <Card className="emptycard">
+          <p className="muted">No campaigns match these filters.</p>
+        </Card>
       ) : (
         <EmptyState text="No campaign sequences yet." action={onNew} />
       )}
@@ -86,7 +84,7 @@ export function Campaigns({ campaigns, onNew, favourites, onToggleFavourite, onO
       {pending && (
         <Confirm
           title="Delete campaign?"
-          message={`“${pending.name}” and its sequence, enrolled leads and pending sends are removed. This cannot be undone.`}
+          message={`“${pending.name}” and its queue and send history are removed. This cannot be undone.`}
           onCancel={() => setPending(undefined)}
           onConfirm={() => {
             const target = pending;

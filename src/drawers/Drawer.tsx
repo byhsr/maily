@@ -3,8 +3,7 @@ import { motion } from "motion/react";
 import type { ReactNode } from "react";
 
 const TITLES: Record<string, string> = {
-  template: "Template",
-  settings: "Settings",
+  template: "Sequence",
   agent: "Agent",
   lead: "Lead",
   knowledge: "Knowledge",
@@ -29,7 +28,7 @@ export function Drawer({ kind, close, children }: DrawerProps) {
       >
         <header>
           <h2>{TITLES[kind]}</h2>
-          <button className="round" onClick={close} aria-label="Close">
+          <button className="btn-icon" onClick={close} aria-label="Close">
             <X />
           </button>
         </header>

@@ -1,12 +1,38 @@
 @layer base {
-  body {
+  /* The root owns the viewport so the shell can never leave a band behind. */
+  html,
+  body,
+  #root {
+    height: 100%;
     margin: 0;
-    font-family: Inter, ui-sans-serif, system-ui;
-    font-size: 14px;
-    line-height: 1.45;
-    background: var(--bg);
-    color: var(--ink);
+    background: var(--bg-app);
+  }
+
+  body {
+    /* The shell scrolls internally; the page itself never scrolls. */
+    overflow: hidden;
+    font-family: var(--font-ui);
+    font-size: var(--fs-base);
+    line-height: 1.5;
+    color: var(--text);
     -webkit-font-smoothing: antialiased;
+  }
+
+  /* One focus ring for every interactive element. */
+  :focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-offset);
+  }
+
+  /* Numbers in stats and tables line up. */
+  .metrics strong,
+  .heronum,
+  .res-count b,
+  .cnum,
+  .navcount,
+  time,
+  table {
+    font-variant-numeric: tabular-nums;
   }
 
   button,
@@ -29,6 +55,6 @@
   }
 
   small {
-    color: var(--ink-3);
+    color: var(--text-faint);
   }
 }

@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
-import { deleteAgent, listAgentRuns, listOpenrouterModels, runAgent, saveAgent } from "../lib/api";
+import { deleteAgent, listAgentRuns, listOpenrouterModels, localOllamaModels, runAgent, saveAgent } from "../lib/api";
 import { AGENT_KIND_LABELS, usageLabel } from "../lib/agents";
 import { KNOWLEDGE_CATEGORIES } from "../lib/knowledge";
-import type { AgentDef, AgentRun, LlmModel } from "../lib/types";
+import type { AgentDef, AgentRun, LlmModel, OllamaModel } from "../lib/types";
 import { Button } from "../ui/Button";
+import { Checkbox } from "../ui/Checkbox";
 import { Confirm } from "../ui/Confirm";
 import { Input } from "../ui/Input";
 import { ModelPicker } from "../ui/ModelPicker";
+import { Select } from "../ui/Select";
 
 type AgentDrawerProps = {
   close: () => void;
@@ -23,6 +25,7 @@ export function AgentDrawer({ close, agent, reload, tell }: AgentDrawerProps) {
   const [categories, setCategories] = useState<string[]>(agent?.knowledge_categories ?? []);
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
   const [catalog, setCatalog] = useState<LlmModel[]>([]);
+  const [local, setLocal] = useState<OllamaModel[]>([]);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [runInput, setRunInput] = useState('{"lead":""}');
@@ -31,6 +34,9 @@ export function AgentDrawer({ close, agent, reload, tell }: AgentDrawerProps) {
   useEffect(() => {
     listOpenrouterModels()
       .then(setCatalog)
+      .catch(() => {});
+    localOllamaModels()
+      .then(setLocal)
       .catch(() => {});
   }, []);
 
@@ -122,13 +128,12 @@ export function AgentDrawer({ close, agent, reload, tell }: AgentDrawerProps) {
       </label>
       <label>
         Task
-        <select value={kind} onChange={(e) => setKind(e.target.value)}>
-          {Object.entries(AGENT_KIND_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
+        <Select
+          label="Task"
+          value={kind}
+          options={Object.entries(AGENT_KIND_LABELS).map(([value, label]) => ({ value, label }))}
+          onChange={setKind}
+        />
       </label>
       <label>
         Model
@@ -136,7 +141,8 @@ export function AgentDrawer({ close, agent, reload, tell }: AgentDrawerProps) {
           value={model}
           onChange={setModel}
           catalog={catalog}
-          placeholder="anthropic/claude-3.5-haiku or ollama:llama3.2"
+          local={local}
+          placeholder="Leave blank to follow Settings, or pick a model"
         />
       </label>
       <label>
@@ -166,13 +172,13 @@ export function AgentDrawer({ close, agent, reload, tell }: AgentDrawerProps) {
           : "Nothing selected — every approved entry is added to the prompt."}
       </small>
 
-      <label className="knowtoggle">
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+      <div className="knowtoggle">
+        <Checkbox checked={enabled} onChange={setEnabled} label="Enabled" />
         <span>
           <b>Enabled</b>
           <small>Disabled agents are skipped when drafts are generated.</small>
         </span>
-      </label>
+      </div>
 
       <div className="settingsrow">
         <Button variant="ink" onClick={save} disabled={busy}>

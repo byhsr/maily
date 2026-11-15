@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { BarChart3 } from "lucide-react";
 import type { StatsPoint } from "../lib/types";
 
 const SERIES = [
@@ -14,7 +15,18 @@ const PAD = 24;
 export function LineChart({ series }: { series: StatsPoint[] }) {
   const [hover, setHover] = useState<number | null>(null);
 
-  if (!series.length) return <p className="muted">No activity in this range yet.</p>;
+  // Drawing a flat line across an empty range reads as data; show the empty
+  // state instead, inside the chart card.
+  const empty = !series.length || series.every((p) => !p.sent && !p.replied && !p.positive);
+  if (empty) {
+    return (
+      <div className="chartempty">
+        <BarChart3 />
+        <b>No data yet</b>
+        <span>Sent, replied and positive counts appear here once a campaign runs.</span>
+      </div>
+    );
+  }
 
   const max = Math.max(1, ...series.flatMap((p) => [p.sent, p.replied, p.positive]));
   const x = (i: number) => PAD + (i * (W - PAD * 2)) / Math.max(1, series.length - 1);

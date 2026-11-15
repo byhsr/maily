@@ -1,27 +1,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { deleteCampaign, listAgents, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, saveCampaign } from "../lib/api";
-import type { AgentDef, Campaign, KnowledgeEntry, Lead, Template } from "../lib/types";
+import { createWorkspace, deleteCampaign, listAccounts, listAgents, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, listWorkspaces, renameWorkspace, saveCampaign, switchWorkspace } from "../lib/api";
+import type { Account, AgentDef, Campaign, KnowledgeEntry, Lead, Template, Workspace } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
-import { Drafts } from "../pages/Drafts";
+import { Campaign as CampaignPage } from "../pages/Campaign";
 import { Leads } from "../pages/Leads";
 import { Inbox } from "../pages/Inbox";
 import { Templates } from "../pages/Templates";
 import { Knowledge } from "../pages/Knowledge";
 import { Agents } from "../pages/Agents";
-import { CampaignCanvas } from "../canvas/Canvas";
+import { Postmaster } from "../pages/Postmaster";
 import { Drawer } from "../drawers/Drawer";
 import { TemplateDrawer } from "../drawers/TemplateDrawer";
 import { LeadDrawer } from "../drawers/LeadDrawer";
 import { AgentDrawer } from "../drawers/AgentDrawer";
-import { SettingsDrawer } from "../drawers/SettingsDrawer";
+import { Settings } from "../pages/Settings";
 import { KnowledgeDrawer } from "../drawers/KnowledgeDrawer";
 import { Sidebar } from "./Sidebar";
 import { Titlebar } from "./Titlebar";
 import { NavContext } from "./nav";
 import { Prompt } from "../ui/Prompt";
+
+/** Where the app is, as one value: a page plus whatever that page needs to render. */
+type Location = { page: string; campaignId?: string; settingsTab?: string; tab?: string; messageId?: string };
+
+const HOME: Location = { page: "Home" };
 
 function readFavourites(): string[] {
   try {
@@ -45,12 +50,31 @@ function isNarrow() {
 }
 
 export function Shell() {
-  const [page, setPage] = useState("Home");
+  /** Every page visited and where along it we are. Back and forward only move the cursor,
+   *  and `page` and the selectors below all read the current entry, so they cannot drift
+   *  out of step with what is on screen. */
+  const [trail, setTrail] = useState<Location[]>([HOME]);
+  const [at, setAt] = useState(0);
+  const here = trail[at];
+  const page = here.page;
+  const editingCampaignId = here.campaignId;
+  const settingsTab = here.settingsTab ?? "accounts";
+  /** Which tab of a campaign is open, and the conversation the Inbox should be showing. */
+  const campaignTab = here.tab;
+  const inboxMessageId = here.messageId;
   const [drawer, setDrawer] = useState<string | undefined>();
-  const [dark, setDark] = useState(localStorage.mailyTheme !== "light");
+  const [workspace, setWorkspace] = useState("Maily");
+  /** Every workspace, and the one that is open. Everything the app lists is gated by it. */
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [activeWorkspace, setActiveWorkspace] = useState("");
+  const [namingWorkspace, setNamingWorkspace] = useState(false);
+  /** The mailbox the Inbox is narrowed to; `undefined` is every account. Held here so the
+   *  sidebar switcher and the Inbox rail cannot disagree. */
+  const [mailAccount, setMailAccount] = useState<string | undefined>();
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
   const [knowledge, setKnowledge] = useState<KnowledgeEntry[]>([]);
   const [agents, setAgents] = useState<AgentDef[]>([]);
   const [note, setNote] = useState("");
@@ -58,18 +82,48 @@ export function Shell() {
   const [editingTemplate, setEditingTemplate] = useState<Template | undefined>();
   const [editingKnowledge, setEditingKnowledge] = useState<KnowledgeEntry | undefined>();
   const [editingAgent, setEditingAgent] = useState<AgentDef | undefined>();
-  const [draftsCampaignId, setDraftsCampaignId] = useState<string | undefined>();
-  const [canvasId, setCanvasId] = useState<string | undefined>();
+  const [editingLead, setEditingLead] = useState<Lead | undefined>();
   const [unread, setUnread] = useState(0);
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobile, setMobile] = useState(isNarrow);
   const [navOpen, setNavOpen] = useState(false);
   const [naming, setNaming] = useState(false);
 
-  const tell = (message: string) => {
+  // A stable identity: `tell` is handed to every page, and one that changed on each
+  // render would make any effect that depends on it re-run with every render of the shell.
+  const tell = useCallback((message: string) => {
     setNote(message);
     setTimeout(() => setNote(""), 4000);
-  };
+  }, []);
+
+  /** Moves to a page, appending it as a step and dropping anything ahead of it — the same
+   *  rule a browser follows. Re-entering the page you are already on records nothing. */
+  const go = useCallback(
+    (next: Partial<Location> & { page: string }) => {
+      const current = trail[at];
+      const merged: Location = { ...current, ...next };
+      // A campaign belongs to the campaign page alone; leaving its id on another page
+      // would reopen that campaign the next time the page was reached.
+      if (merged.page !== "Campaign") merged.campaignId = undefined;
+      if (
+        merged.page === current.page &&
+        merged.campaignId === current.campaignId &&
+        merged.settingsTab === current.settingsTab &&
+        merged.tab === current.tab &&
+        merged.messageId === current.messageId
+      ) {
+        return;
+      }
+      setTrail([...trail.slice(0, at + 1), merged]);
+      setAt(at + 1);
+    },
+    [trail, at]
+  );
+
+  const step = useCallback(
+    (delta: number) => setAt((value) => Math.min(Math.max(value + delta, 0), trail.length - 1)),
+    [trail.length]
+  );
 
   const load = async () => {
     try {
@@ -96,14 +150,66 @@ export function Shell() {
     }
   };
 
-  useEffect(() => {
-    load();
+  const loadAccounts = useCallback(async () => {
+    try {
+      setAccounts(await listAccounts());
+    } catch {
+      /* the connected-account list is best-effort */
+    }
   }, []);
 
+  /** Reads the workspaces and names the open one, which is what the switcher shows. */
+  const loadWorkspaces = useCallback(async () => {
+    try {
+      const list = await listWorkspaces();
+      setWorkspaces(list.workspaces);
+      setActiveWorkspace(list.active);
+      const open = list.workspaces.find((one) => one.id === list.active);
+      if (open) setWorkspace(open.name);
+    } catch (e) {
+      tell(String(e));
+    }
+  }, [tell]);
+
+  /** Switches workspace, then reloads everything: none of it carries across. */
+  const openWorkspace = useCallback(
+    async (id: string) => {
+      if (id === activeWorkspace) return;
+      try {
+        await switchWorkspace(id);
+      } catch (e) {
+        tell(String(e));
+        return;
+      }
+      setActiveWorkspace(id);
+      setMailAccount(undefined);
+      // The trail was walked inside one workspace: another workspace's campaigns are not
+      // ours to reopen, and a campaign view cannot survive the switch. Start it again here.
+      setTrail([page === "Campaign" ? { page: "Campaigns" } : { page }]);
+      setAt(0);
+      await Promise.all([load(), loadAccounts()]);
+      await loadWorkspaces();
+    },
+    [activeWorkspace, page, tell]
+  );
+
   useEffect(() => {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-    localStorage.mailyTheme = dark ? "dark" : "light";
-  }, [dark]);
+    load();
+    loadAccounts();
+    loadWorkspaces();
+  }, []);
+
+  // An account that has been disconnected must not leave the Inbox stuck on an empty
+  // mailbox nothing can ever fill.
+  useEffect(() => {
+    if (mailAccount && accounts.length && !accounts.some((one) => one.id === mailAccount)) {
+      setMailAccount(undefined);
+    }
+  }, [accounts, mailAccount]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = "dark";
+  }, []);
 
   useEffect(() => {
     try {
@@ -135,12 +241,19 @@ export function Shell() {
         if (mobile) setNavOpen((open) => !open);
         else setCollapsed((value) => !value);
       }
+      if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        step(e.key === "ArrowLeft" ? -1 : 1);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mobile]);
+  }, [mobile, step]);
 
-  const nav = useMemo(() => ({ mobile, openNav: () => setNavOpen(true) }), [mobile]);
+  const nav = useMemo(
+    () => ({ mobile, openNav: () => setNavOpen(true), collapsed, setCollapsed }),
+    [mobile, collapsed]
+  );
 
   const toggleFavourite = (id: string) => {
     setFavourites((prev) => {
@@ -155,49 +268,71 @@ export function Shell() {
     setEditingTemplate(undefined);
     setEditingKnowledge(undefined);
     setEditingAgent(undefined);
+    setEditingLead(undefined);
   };
 
-  const openCampaign = (campaign: Campaign) => {
-    setCanvasId(campaign.id);
-    setPage("Canvas");
+  const openNewLead = () => {
+    setEditingLead(undefined);
+    setDrawer("lead");
   };
+
+  const openLead = (lead: Lead) => {
+    setEditingLead(lead);
+    setDrawer("lead");
+  };
+
+  const openCampaignEditor = (id: string) => go({ page: "Campaign", campaignId: id });
 
   const startNewCampaign = () => setNaming(true);
 
   const createCampaign = async (name: string) => {
-    const created = await saveCampaign({
-      name,
-      template_id: null,
-      mode: "draft",
-      schedule: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
-    });
+    const created = await saveCampaign({ name });
     await load();
-    setCanvasId(created);
-    setPage("Canvas");
+    openCampaignEditor(created);
   };
 
   const removeCampaign = async (id: string) => {
     await deleteCampaign(id);
-    if (canvasId === id) setCanvasId(undefined);
     await load();
   };
 
   const favouriteCampaigns = campaigns.filter((c) => favourites.includes(c.id));
+  const editingCampaign = campaigns.find((c) => c.id === editingCampaignId);
 
   return (
     <NavContext.Provider value={nav}>
       <div className="desktop">
-        <Titlebar collapsed={collapsed && !mobile} onToggle={toggleSidebar} />
+        <Titlebar
+          collapsed={collapsed && !mobile}
+          onToggle={toggleSidebar}
+          onBack={() => step(-1)}
+          onForward={() => step(1)}
+          canBack={at > 0}
+          canForward={at < trail.length - 1}
+        />
         <div className="app">
         <Sidebar
           page={page}
-          onNavigate={setPage}
-          onOpenSettings={() => setDrawer("settings")}
+          onNavigate={(next) => go({ page: next })}
+          onOpenSettings={() => go({ page: "Settings" })}
+          accounts={accounts}
+          onOpenAccounts={() => go({ page: "Settings", settingsTab: "accounts" })}
+          mailAccount={mailAccount}
+          onPickAccount={(account) => {
+            setMailAccount(account);
+            go({ page: "Inbox" });
+          }}
+          workspaces={workspaces}
+          activeWorkspace={activeWorkspace}
+          onSwitchWorkspace={(id) => void openWorkspace(id)}
+          onCreateWorkspace={() => setNamingWorkspace(true)}
           favourites={favouriteCampaigns}
-          onOpenFavourites={() => setPage("Campaigns")}
+          onOpenFavourites={() => go({ page: "Campaigns" })}
           campaigns={campaigns}
-          onOpenCampaign={openCampaign}
-          activeCampaignId={page === "Canvas" ? canvasId : undefined}
+          onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
+          onNewCampaign={startNewCampaign}
+          workspace={workspace}
+          activeCampaignId={page === "Campaign" ? editingCampaignId : undefined}
           collapsed={collapsed}
           mobile={mobile}
           open={navOpen}
@@ -205,9 +340,19 @@ export function Shell() {
           notifications={unread}
         />
         {mobile && navOpen && <div className="app-scrim" onClick={() => setNavOpen(false)} />}
-        <main className="app-main">
+        {/* The Inbox owns its own full-height panes, so it takes the column without the
+            page padding or the column's scroll. */}
+        <main className={page === "Inbox" ? "app-main app-main-flush" : "app-main"}>
+          {/* Keyed by the workspace: switching refetches the figures against the new one,
+              rather than leaving the last workspace's analytics on screen. */}
           {page === "Home" && (
-            <Home campaigns={campaigns} open={setDrawer} onNewCampaign={startNewCampaign} onOpenCampaign={openCampaign} />
+            <Home
+              key={activeWorkspace}
+              campaigns={campaigns}
+              open={setDrawer}
+              onNewCampaign={startNewCampaign}
+              onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
+            />
           )}
           {page === "Campaigns" && (
             <Campaigns
@@ -215,17 +360,22 @@ export function Shell() {
               onNew={startNewCampaign}
               favourites={favourites}
               onToggleFavourite={toggleFavourite}
-              onOpenCanvas={openCampaign}
-              onOpenDrafts={(campaign) => {
-                setDraftsCampaignId(campaign.id);
-                setPage("Drafts");
-              }}
+              onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
               onDelete={removeCampaign}
               tell={tell}
             />
           )}
-          {page === "Leads" && <Leads leads={leads} open={setDrawer} reload={load} tell={tell} />}
-          {page === "Inbox" && <Inbox tell={tell} />}
+          {page === "Leads" && <Leads leads={leads} open={openNewLead} onEdit={openLead} reload={load} tell={tell} />}
+          {/* Keyed by the workspace: switching remounts the Inbox against the new one. */}
+          {page === "Inbox" && (
+            <Inbox
+              key={activeWorkspace}
+              tell={tell}
+              account={mailAccount}
+              onAccount={setMailAccount}
+              initialMessageId={inboxMessageId}
+            />
+          )}
           {page === "Templates" && (
             <Templates
               templates={templates}
@@ -246,6 +396,8 @@ export function Shell() {
                 setEditingKnowledge(entry);
                 setDrawer("knowledge");
               }}
+              reload={load}
+              tell={tell}
             />
           )}
           {page === "Agents" && (
@@ -259,17 +411,35 @@ export function Shell() {
               tell={tell}
             />
           )}
-          {page === "Drafts" && draftsCampaignId && (
-            <Drafts campaignId={draftsCampaignId} tell={tell} onBack={() => setPage("Campaigns")} />
-          )}
-          {page === "Canvas" && (
-            <CampaignCanvas
-              campaigns={campaigns}
-              initialCampaignId={canvasId}
-              templates={templates}
+          {page === "Postmaster" && <Postmaster tell={tell} />}
+          {page === "Settings" && (
+            <Settings
               tell={tell}
-              onSelect={setCanvasId}
-              onBack={() => setPage("Campaigns")}
+              workspace={workspace}
+              onWorkspaceChange={(next) => {
+                setWorkspace(next);
+                renameWorkspace(activeWorkspace, next)
+                  .then(() => loadWorkspaces())
+                  .catch((e) => tell(String(e)));
+              }}
+              section={settingsTab}
+              onAccountsChange={loadAccounts}
+            />
+          )}
+          {page === "Campaign" && editingCampaign && (
+            <CampaignPage
+              key={editingCampaign.id}
+              campaign={editingCampaign}
+              templates={templates}
+              leads={leads}
+              reload={load}
+              tell={tell}
+              tab={campaignTab}
+              onTab={(tab) => go({ page: "Campaign", tab })}
+              onBack={() => step(-1)}
+              onDeleted={() => go({ page: "Campaigns" })}
+              onDuplicated={(id) => go({ page: "Campaign", campaignId: id })}
+              onOpenThread={(messageId) => go({ page: "Inbox", messageId })}
             />
           )}
         </main>
@@ -278,16 +448,21 @@ export function Shell() {
           {drawer && (
             <Drawer kind={drawer} close={closeDrawer}>
               {drawer === "template" && (
-                <TemplateDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} template={editingTemplate} />
+                <TemplateDrawer
+                  close={closeDrawer}
+                  reload={load}
+                  tell={tell}
+                  leads={leads}
+                  template={editingTemplate}
+                />
               )}
-              {drawer === "settings" && <SettingsDrawer tell={tell} dark={dark} setDark={setDark} />}
               {drawer === "agent" && (
                 <AgentDrawer close={closeDrawer} agent={editingAgent} reload={load} tell={tell} />
               )}
               {drawer === "knowledge" && (
                 <KnowledgeDrawer close={closeDrawer} entry={editingKnowledge} reload={load} tell={tell} />
               )}
-              {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} />}
+              {drawer === "lead" && <LeadDrawer close={closeDrawer} reload={load} tell={tell} leads={leads} lead={editingLead} />}
             </Drawer>
           )}
         </AnimatePresence>
@@ -306,6 +481,25 @@ export function Shell() {
               createCampaign(name).catch((e) => tell(String(e)));
             }}
             onCancel={() => setNaming(false)}
+          />
+        )}
+        {namingWorkspace && (
+          <Prompt
+            title="New workspace"
+            placeholder="Acme — Q3 outbound"
+            onSubmit={(name) => {
+              setNamingWorkspace(false);
+              createWorkspace(name)
+                .then(async () => {
+                  // Creating one switches to it, so the lists reload against the new one.
+                  setMailAccount(undefined);
+                  await Promise.all([load(), loadAccounts()]);
+                  await loadWorkspaces();
+                  tell(`Workspace “${name}” created`);
+                })
+                .catch((e) => tell(String(e)));
+            }}
+            onCancel={() => setNamingWorkspace(false)}
           />
         )}
       </div>

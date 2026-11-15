@@ -11,7 +11,7 @@ export function EmptyState({ text, action, label = "Get started" }: EmptyStatePr
   return (
     <div className="blank">
       <p>{text}</p>
-      <button onClick={action}>
+      <button className="btn-secondary" onClick={action}>
         {label} <ChevronRight />
       </button>
     </div>

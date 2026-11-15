@@ -1,0 +1,681 @@
+/*
+ * The campaign detail page. Chrome is dense and instrument-like, content is calm; depth is
+ * one plane step and a hairline border, never a shadow. Colours come from tokens only.
+ */
+
+/* ---------- The header's third row ---------- */
+
+/* A page whose tabs are navigation: the tabs get their own row and the header rules its
+   own bottom edge, so the columns below start flush against it. */
+.pagehead.tabbed {
+  flex-wrap: wrap;
+  padding-bottom: var(--s3);
+  border-bottom: 1px solid var(--border);
+}
+
+.pagehead-tabs {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.segmented button em {
+  margin-left: var(--s2);
+  padding: 0 5px;
+  border-radius: var(--r-chip);
+  background: var(--bg-active);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-style: normal;
+}
+
+/* The title is the editable thing itself: no box until you point at it. */
+.titleinput {
+  min-width: 120px;
+  max-width: 520px;
+  height: 30px;
+  padding: 0 var(--s2);
+  margin-left: -8px;
+  border: 1px solid transparent;
+  border-radius: var(--r-input);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  outline: none;
+}
+
+.titleinput:hover {
+  background: var(--bg-hover);
+}
+
+.titleinput:focus {
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+
+.statusbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 var(--s2);
+  border-radius: 6px;
+  font-size: var(--fs-xs);
+}
+
+/* The dot is the only colour a badge carries: a classification, never decoration. */
+.statusbadge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.statusbadge.state-active::before,
+.statusbadge.state-throttled::before {
+  background: var(--warning-text);
+}
+
+.statusbadge.state-active::before {
+  background: var(--success);
+}
+
+.statusbadge.state-paused::before,
+.statusbadge.state-scheduled::before {
+  background: var(--warning-text);
+}
+
+.statusbadge.state-done::before {
+  background: var(--accent);
+}
+
+.statusbadge.state-failed::before {
+  background: var(--danger);
+}
+
+.savedmark {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* A disabled button still has to explain itself, so the tip needs something to hold. */
+.launchwrap {
+  display: inline-flex;
+}
+
+/* ---------- Two columns ---------- */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+}
+
+.setupcols {
+  display: grid;
+  grid-template-columns: minmax(0, 720px) 280px;
+  align-items: start;
+  gap: var(--s5);
+}
+
+.setupmain,
+.setupside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  min-width: 0;
+}
+
+.setupside {
+  position: sticky;
+  top: 24px;
+}
+
+@media (max-width: 1080px) {
+  .setupcols {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .setupside {
+    position: static;
+  }
+}
+
+.locknote {
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* ---------- Section cards ---------- */
+
+.sectioncard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.sectioncard > header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sectioncard > header h2 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sectioncard > header p {
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.sectioncard > header:has(.leadfilters) {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+/* One settings row: the label, then the control, at a width that fits the content. */
+.srow {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--s3);
+}
+
+.srow > label,
+.srow > span:first-child {
+  padding-top: 8px;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.srow .wide {
+  max-width: 320px;
+}
+
+.srow .seqbody {
+  min-height: 120px;
+  max-width: 560px;
+}
+
+.link {
+  margin-left: var(--s2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-13);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link:hover {
+  color: var(--text);
+}
+
+/* ---------- The dropzone ---------- */
+
+.dropzone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 72px;
+  max-width: 560px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  cursor: pointer;
+  transition: border-color var(--motion) var(--ease-out), color var(--motion) var(--ease-out);
+}
+
+.dropzone:hover,
+.dropzone.over {
+  border-color: var(--text-faint);
+  color: var(--text);
+}
+
+.filerow {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  max-width: 560px;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+}
+
+.filerowmain {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.filerowmain b {
+  color: var(--text);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+.filerowmain small {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* ---------- The sequence timeline ---------- */
+
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  position: relative;
+}
+
+.tstep {
+  position: relative;
+  padding-left: var(--s5);
+}
+
+/* The rail: one hairline down the whole sequence, with a dot where each step is. */
+.tstep::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+
+.tstep:last-child::before {
+  bottom: auto;
+  height: 14px;
+}
+
+.tdot {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.tconnect {
+  margin: 0 0 var(--s2) 0;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.tcard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-input);
+}
+
+.tcardhead {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.tcardhead b {
+  flex: 1;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.tcardbody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.tpreview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tpreview b {
+  font-size: var(--fs-13);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.tpreview small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A collapsed strip that opens into the stop rules. */
+.ruleline {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ruleline small {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* ---------- Pace ---------- */
+
+.pace {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.pace input {
+  width: 56px;
+  text-align: center;
+}
+
+.pacehelp {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* What editing copy that has already gone out will actually do. */
+.tnote {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* When the campaign may begin, with the one control that changes it. */
+.startline {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding-top: 8px;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+/* ---------- The checklist ---------- */
+
+.checklist {
+  gap: var(--s2);
+}
+
+.checkrow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.checkrow svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--text-faint);
+}
+
+.checkrow.ok {
+  color: var(--text);
+}
+
+.checkrow.ok svg {
+  color: var(--success);
+}
+
+.checksum {
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* ---------- Activity ---------- */
+
+.funnelrow {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--fs-13);
+}
+
+.funnelname {
+  color: var(--text);
+}
+
+.funnelbar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+.funnelbar em {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--text);
+}
+
+.funnelcount {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.feedrows {
+  display: flex;
+  flex-direction: column;
+}
+
+.feedrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.feedrow:last-child {
+  border-bottom: 0;
+}
+
+.feedrow:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.feedrow:disabled {
+  cursor: default;
+}
+
+.feedname {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--fs-13);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedtime {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.chipchip {
+  flex: none;
+  padding: 2px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.chipchip.replied {
+  color: var(--text);
+}
+
+.chipchip.bounced {
+  color: var(--danger);
+}
+
+/* ---------- The leads table ---------- */
+
+.leadfilters {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.leadtable {
+  display: flex;
+  flex-direction: column;
+}
+
+.leadhead,
+.leadrowline {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1.1fr) minmax(0, 1.4fr) minmax(0, 1fr) 110px 90px 90px 40px;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.leadhead {
+  height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.leadrowline {
+  height: 44px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.leadrowline:last-child {
+  border-bottom: 0;
+}
+
+.leadrowline:hover {
+  background: var(--bg-hover);
+}
+
+.truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipstatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.chipstatus::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.chipstatus.sent::before,
+.chipstatus.replied::before {
+  background: var(--success);
+}
+
+.chipstatus.bounced::before {
+  background: var(--danger);
+}
+
+.chipstatus.unsubscribed::before,
+.chipstatus.skipped::before {
+  background: var(--warning-text);
+}
+
+/* ---------- The column mapping overlay ---------- */
+
+.mapcard {
+  width: min(520px, calc(100vw - 32px));
+  gap: var(--s3);
+}
+
+.mapcard .srow > label {
+  padding-top: 8px;
+}
+
+.mapcard code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-input);
+  font-size: var(--fs-xs);
+}
+
+/* The account health dot the Select draws, in the two states that matter. */
+.dot-good {
+  background: var(--success);
+}
+
+.dot-bad {
+  background: var(--danger);
+}

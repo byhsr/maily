@@ -1,6 +1,14 @@
-import { Mail, Mailbox, MoreVertical, Star } from "lucide-react";
+import { Mail, Mailbox, MoreVertical, Send, Star } from "lucide-react";
 import { useState } from "react";
 import type { Campaign } from "../lib/types";
+
+const STATUS_LABEL: Record<string, string> = {
+  draft: "Draft",
+  active: "Active",
+  paused: "Paused",
+  throttled: "Paused",
+  done: "Finished",
+};
 
 const relTime = (iso?: string) => {
   if (!iso) return "";
@@ -26,11 +34,10 @@ type CampaignCardProps = {
   favourite: boolean;
   onToggleFavourite: () => void;
   onOpen: () => void;
-  onDrafts: () => void;
   onDelete: () => void;
 };
 
-export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDrafts, onDelete }: CampaignCardProps) {
+export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDelete }: CampaignCardProps) {
   const [menu, setMenu] = useState(false);
   const active = campaign.status === "active";
   const when = relTime(campaign.approved_at);
@@ -39,64 +46,79 @@ export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, o
   return (
     <article className="campaigncard">
       <div className="cardhead">
-        <button
-          className="pin"
-          onClick={onToggleFavourite}
-          aria-label={favourite ? "Unpin campaign" : "Pin campaign"}
-          title={favourite ? "Unpin" : "Pin to favourites"}
-        >
-          <Star fill={favourite ? "currentColor" : "none"} />
-        </button>
-        <div className="kebabwrap">
-          <button className="kebab" onClick={() => setMenu((open) => !open)} aria-label="Campaign actions" title="More">
-            <MoreVertical />
+        <span className="cardsource">
+          <i className="cardsource-icon">
+            <Send />
+          </i>
+          <span>{campaign.list_name?.trim() || "All leads"}</span>
+        </span>
+        <div className="cardactions">
+          <button
+            className="pin"
+            onClick={onToggleFavourite}
+            aria-label={favourite ? "Unpin campaign" : "Pin campaign"}
+            title={favourite ? "Unpin" : "Pin to favourites"}
+          >
+            <Star fill={favourite ? "currentColor" : "none"} />
           </button>
-          {menu && (
-            <>
-              <div className="menuscrim" onClick={() => setMenu(false)} />
-              <div className="cardmenu" role="menu">
-                <button
-                  onClick={() => {
-                    setMenu(false);
-                    onOpen();
-                  }}
-                >
-                  Open campaign
-                </button>
-                <button
-                  onClick={() => {
-                    setMenu(false);
-                    onDrafts();
-                  }}
-                >
-                  Review drafts
-                </button>
-                <button
-                  className="danger"
-                  onClick={() => {
-                    setMenu(false);
-                    onDelete();
-                  }}
-                >
-                  Delete
-                </button>
-              </div>
-            </>
-          )}
+          <div className="kebabwrap">
+            <button
+              className="kebab"
+              onClick={() => setMenu((open) => !open)}
+              aria-label="Campaign actions"
+              title="More"
+            >
+              <MoreVertical />
+            </button>
+            {menu && (
+              <>
+                <div className="menuscrim" onClick={() => setMenu(false)} />
+                <div className="cardmenu" role="menu">
+                  <button
+                    onClick={() => {
+                      setMenu(false);
+                      onOpen();
+                    }}
+                  >
+                    Open campaign
+                  </button>
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      setMenu(false);
+                      onDelete();
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
       <button className="cardbody" onClick={onOpen}>
-        <span className="meta">
-          {when && (
-            <>
-              <time>{when}</time>
-              <span>·</span>
-            </>
-          )}
-          {active && <i className="dot" />}
-          <span>{active ? "Active" : campaign.status}</span>
+        <span className="cardtitle">
+          <h3>{campaign.name}</h3>
+          {campaign.leads > 0 && <i className="countbadge">{campaign.leads}</i>}
         </span>
-        <h3>{campaign.name}</h3>
+        <span className="chiprow">
+          <span className="chip">
+            <i className={active ? "dot" : "dot is-idle"} />
+            {STATUS_LABEL[campaign.status] ?? campaign.status}
+          </span>
+          {campaign.followups ? (
+            <span className="chip">
+              {campaign.followups} follow-up{campaign.followups === 1 ? "" : "s"}
+            </span>
+          ) : null}
+        </span>
+        <span className="cardmeta">
+          <span>
+            {campaign.sent}/{campaign.leads} sent
+          </span>
+          {when && <span>· {when}</span>}
+        </span>
         <span className="cardfoot">
           <span className="avatars">
             {avatars.map((a, i) => (

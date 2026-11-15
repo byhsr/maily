@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy, Mail, Minus, PanelLeftClose, PanelLeftOpen, Square, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Copy, Minus, PanelLeftClose, PanelLeftOpen, Square, X } from "lucide-react";
 
 function WindowControls() {
   const [maximized, setMaximized] = useState(false);
@@ -49,9 +49,18 @@ function WindowControls() {
 type TitlebarProps = {
   collapsed: boolean;
   onToggle: () => void;
+  onBack: () => void;
+  onForward: () => void;
+  canBack: boolean;
+  canForward: boolean;
 };
 
-export function Titlebar({ collapsed, onToggle }: TitlebarProps) {
+/**
+ * The frameless window's 36px strip. Transparent — nothing but the sidebar
+ * toggle, the history buttons, the drag region and the window controls. The
+ * wordmark is gone; the app's identity lives in the sidebar's workspace switcher.
+ */
+export function Titlebar({ collapsed, onToggle, onBack, onForward, canBack, canForward }: TitlebarProps) {
   return (
     <header className="titlebar">
       <button
@@ -62,11 +71,15 @@ export function Titlebar({ collapsed, onToggle }: TitlebarProps) {
       >
         {collapsed ? <PanelLeftOpen /> : <PanelLeftClose />}
       </button>
-      <div className="brand">
-        <i>
-          <Mail />
-        </i>
-        <b>maily</b>
+      {/* History, not hierarchy: disabled at either end of the trail rather than hidden,
+          so the strip does not shift under the pointer as you move through it. */}
+      <div className="titlebar-nav">
+        <button onClick={onBack} disabled={!canBack} title="Back (Alt+←)" aria-label="Back">
+          <ArrowLeft />
+        </button>
+        <button onClick={onForward} disabled={!canForward} title="Forward (Alt+→)" aria-label="Forward">
+          <ArrowRight />
+        </button>
       </div>
       <div className="drag" data-tauri-drag-region />
       <WindowControls />

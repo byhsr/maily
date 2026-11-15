@@ -1,12 +1,14 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-export type ButtonVariant = "primary" | "ghost" | "ink" | "icon";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "icon" | "ink";
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
-  primary: "lime",
-  ghost: "ghost",
-  ink: "ink",
-  icon: "round",
+  primary: "btn-primary",
+  secondary: "btn-secondary",
+  ghost: "btn-ghost",
+  icon: "btn-icon",
+  /* Legacy name: drawers used "ink" for their single primary action. */
+  ink: "btn-primary",
 };
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -17,7 +19,7 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 export function Button({ variant = "primary", className, children, ...rest }: ButtonProps) {
   const cls = [VARIANT_CLASS[variant], className].filter(Boolean).join(" ");
   return (
-    <button className={cls || undefined} {...rest}>
+    <button className={cls} {...rest}>
       {children}
     </button>
   );

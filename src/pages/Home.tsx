@@ -5,11 +5,10 @@ import type { Campaign, DashboardStats } from "../lib/types";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { Card } from "../ui/Card";
-import { FilterChip } from "../ui/FilterChip";
 import { HeroNumber } from "../ui/HeroNumber";
 import { LineChart } from "../ui/LineChart";
+import { PageHeader } from "../ui/PageHeader";
 import { Stat } from "../ui/Stat";
-import { Topbar } from "../ui/Topbar";
 
 const RANGES = ["Week", "Month", "Year"];
 
@@ -58,30 +57,38 @@ export function Home({ campaigns, open, onNewCampaign, onOpenCampaign }: HomePro
       delta: delta(totals.positive, previous.positive),
       spark: series.map((p) => p.positive),
     },
-    { label: "Failed", value: totals.failed, delta: delta(totals.failed, previous.failed), spark: series.map((p) => p.failed) },
+    {
+      label: "Failed",
+      value: totals.failed,
+      delta: delta(totals.failed, previous.failed),
+      spark: series.map((p) => p.failed),
+    },
   ];
 
   return (
     <>
-      <Topbar
+      <PageHeader
+        title="Home"
         status={stats ? `${totals.sent} sent` : "Local"}
-        action={<Button onClick={onNewCampaign}>New</Button>}
+        segmented={
+          <div className="segmented">
+            {RANGES.map((r) => (
+              <button key={r} type="button" className={range === r ? "on" : ""} onClick={() => setRange(r)}>
+                {r}
+              </button>
+            ))}
+          </div>
+        }
+        action={<Button onClick={onNewCampaign}>New campaign</Button>}
       />
 
-      <div className="hero">
-        <div>
-          <label>REPLIES THIS {range.toUpperCase()}</label>
-          <HeroNumber value={totals.replied} />
-          <p className="muted">
-            {totals.positive} positive · {pct(totals.replied, totals.sent)}% of {totals.sent} sent
-          </p>
-        </div>
-        <div className="chips">
-          {RANGES.map((r) => (
-            <FilterChip key={r} label={r} active={range === r} onClick={() => setRange(r)} />
-          ))}
-        </div>
-      </div>
+      <section className="hero">
+        <label>Replies this {range.toLowerCase()}</label>
+        <HeroNumber value={totals.replied} />
+        <p className="muted">
+          {totals.positive} positive · {pct(totals.replied, totals.sent)}% of {totals.sent} sent
+        </p>
+      </section>
 
       <Card className="chartcard">
         <LineChart series={series} />
@@ -97,10 +104,10 @@ export function Home({ campaigns, open, onNewCampaign, onOpenCampaign }: HomePro
         <Card as="section">
           <header>
             <div>
-              <label>NEEDS ATTENTION</label>
+              <label>Needs attention</label>
               <h3>{stats?.needsAttention ?? 0} replies waiting</h3>
             </div>
-            <Button variant="ghost" onClick={() => open("lead")}>
+            <Button variant="secondary" onClick={() => open("lead")}>
               Open <ChevronRight />
             </Button>
           </header>
@@ -110,13 +117,13 @@ export function Home({ campaigns, open, onNewCampaign, onOpenCampaign }: HomePro
               : "Nothing waiting — every reply is classified."}
           </p>
         </Card>
-        <Card as="section" className="limecard">
+        <Card as="section">
           <header>
             <div>
-              <label>ACTIVE CAMPAIGNS</label>
+              <label>Active campaigns</label>
               <h3>{stats?.activeCampaigns ?? 0} running</h3>
             </div>
-            <Button variant="ghost" onClick={onNewCampaign}>
+            <Button variant="secondary" onClick={onNewCampaign}>
               New <ChevronRight />
             </Button>
           </header>
@@ -127,7 +134,9 @@ export function Home({ campaigns, open, onNewCampaign, onOpenCampaign }: HomePro
                   <span className="rowname">
                     <b>{c.name}</b>
                   </span>
-                  <small>{c.leads} leads · {c.mode}</small>
+                  <small>
+                    {c.leads} leads · {c.mode}
+                  </small>
                   <Badge>{c.status}</Badge>
                   <Button variant="ghost" onClick={() => onOpenCampaign(c)}>
                     Edit <ChevronRight />

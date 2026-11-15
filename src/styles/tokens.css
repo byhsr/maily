@@ -1,82 +1,99 @@
+/* ============================================================================
+   Design tokens — single source of truth.
+
+   Aesthetic: quiet dark SaaS. Near-black planes separated by 1px borders, one
+   reserved blue accent for links/focus, no shadows. Depth is bg shade + border.
+
+   Everything below is the canonical set. The legacy names at the bottom alias
+   onto it so the older rules in components.css keep resolving while the app is
+   converted over — nothing should reference a raw colour outside this file.
+   ========================================================================== */
+
+:root {
+  /* ---- Palette (the only literal colours in the app) ------------------- */
+  --bg-app: #0c0c0d;
+  --bg-sidebar: #111113;
+  --bg-card: #161618;
+  --bg-hover: rgba(255, 255, 255, 0.04);
+  --bg-active: rgba(255, 255, 255, 0.07);
+  --bg-input: #1c1c1f;
+
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  --text: #ececee;
+  --text-muted: #8b8b92;
+  --text-faint: #5f5f66;
+
+  /* Overlay behind modals menus and the mobile nav. */
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  --accent: #3b82f6;
+  --success: #22c55e;
+  --danger: #f87171;
+  --warning-bg: rgba(249, 115, 22, 0.15);
+  --warning-text: #fb923c;
+
+  /* Classification dots — the one place hue carries meaning beyond the accent. A reply
+     is marked by a dot, and the Inbox rail and its chips both read from these. */
+  --class-green: var(--success);
+  --class-blue: var(--accent);
+  --class-amber: #f59e0b;
+  --class-gray: var(--text-muted);
+  --class-purple: #a78bfa;
+  --class-red: var(--danger);
+  --class-orange: var(--warning-text);
+
+  /* ---- Spacing — 4px base. Nothing off this scale. --------------------- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --s7: 48px;
+
+  /* ---- Radius — cards 12, inputs/buttons/nav 8, chips 6, pills = avatars */
+  --r-card: 12px;
+  --r-input: 8px;
+  --r-nav: 8px;
+  --r-chip: 6px;
+
+  /* ---- Type ------------------------------------------------------------ */
+  --font-ui: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --fs-xs: 11px; /* group labels, badges */
+  --fs-sm: 12px; /* labels, meta, helper text */
+  --fs-13: 13px; /* nav, body, inputs */
+  --fs-base: 13px; /* document default */
+  --fs-md: 14px; /* card titles */
+  --fs-lg: 20px; /* page title */
+  --fs-xl: 20px;
+  --fs-2xl: 28px; /* hero metric — the largest numeral allowed */
+  --fs-stat: 24px; /* stat-card value */
+
+  /* ---- Motion — colour changes only ----------------------------------- */
+  --motion: 120ms;
+  --motion-fast: 120ms;
+  --motion-slow: 160ms;
+  --ease-out: ease;
+
+  /* ---- Focus ----------------------------------------------------------- */
+  --focus-ring: 2px solid var(--accent);
+  --focus-offset: 2px;
+
+  /* ---- Chrome ---------------------------------------------------------- */
+  --sidebar-w: 240px;
+  --sidebar-w-collapsed: 64px;
+  --titlebar-h: 36px;
+  --h-nav: 32px; /* sidebar nav item height */
+  --h-control: 32px; /* buttons and inputs */
+}
+
+/* Dark is the only theme. Kept as an attribute selector so the existing
+   `data-theme` wiring in main.tsx stays meaningful. */
 :root,
-:root[data-theme="light"] {
-  --bg: #f7f7f8;
-  --surface: #ffffff;
-  --surface-2: #f0f0f3;
-  --surface-3: #e8e8ec;
-  --line: #ececef;
-
-  --ink: #111114;
-  --ink-2: #6b6b73;
-  --ink-3: #a1a1aa;
-
-  /* Monochrome: the primary button and the "active" dot use ink, not a hue. */
-  --accent: #111114;
-  --accent-ink: #f7f7f8;
-
-  /* Fixed, theme-independent values that sit on top of color (badges). */
-  --paper: #ffffff;
-  --paper-ink: #111114;
-  --red: #ef4444;
-  --star: #6b6b73;
-
-  --ok: #16a34a;
-  --warn: #d98a00;
-  --bad: #d64545;
-
-  --tint-lilac: #f0f0f3;
-  --tint-blue: #f0f0f3;
-  --tint-peach: #f0f0f3;
-  --tint-mint: #f0f0f3;
-
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.04);
-
-  --r-card: 16px;
-  --r-chip: 10px;
-  --r-pill: 999px;
-
-  --sidebar-w: 232px;
-  --sidebar-w-collapsed: 64px;
-  --titlebar-h: 38px;
-}
-
 :root[data-theme="dark"] {
-  --bg: #0e0e10;
-  --surface: #16161a;
-  --surface-2: #1f1f24;
-  --surface-3: #26262c;
-  --line: #26262c;
-
-  --ink: #f4f4f5;
-  --ink-2: #a1a1aa;
-  --ink-3: #6b6b73;
-
-  /* Monochrome: the primary button and the "active" dot use ink, not a hue. */
-  --accent: #f4f4f5;
-  --accent-ink: #0e0e10;
-
-  --paper: #ffffff;
-  --paper-ink: #111114;
-  --red: #ef4444;
-  --star: #a1a1aa;
-
-  --ok: #22c55e;
-  --warn: #d98a00;
-  --bad: #ef4444;
-
-  /* Same neutral surface in both themes; tints no longer carry a hue. */
-  --tint-lilac: #1f1f24;
-  --tint-blue: #1f1f24;
-  --tint-peach: #1f1f24;
-  --tint-mint: #1f1f24;
-
-  --shadow-1: none;
-
-  --r-card: 16px;
-  --r-chip: 10px;
-  --r-pill: 999px;
-
-  --sidebar-w: 232px;
-  --sidebar-w-collapsed: 64px;
-  --titlebar-h: 38px;
+  color-scheme: dark;
 }
+

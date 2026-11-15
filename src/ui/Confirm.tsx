@@ -14,8 +14,8 @@ export function Confirm({ title, message, confirmLabel = "Delete", onConfirm, on
         <h3>{title}</h3>
         <p>{message}</p>
         <div className="confirm-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="danger" onClick={onConfirm}>
+          <button type="button" onClick={onCancel}>Cancel</button>
+          <button type="button" className="danger" onClick={onConfirm}>
             {confirmLabel}
           </button>
         </div>
