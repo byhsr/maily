@@ -438,7 +438,7 @@ export function Shell() {
               tell={tell}
               tab={campaignTab}
               onTab={(tab) => go({ page: "Campaign", tab })}
-              onBack={() => step(-1)}
+              onBackToCampaigns={() => go({ page: "Campaigns" })}
               onDeleted={() => go({ page: "Campaigns" })}
               onDuplicated={(id) => go({ page: "Campaign", campaignId: id })}
               onOpenThread={(messageId) => go({ page: "Inbox", messageId })}

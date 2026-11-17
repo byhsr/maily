@@ -63,7 +63,9 @@ type CampaignProps = {
   /** Which tab is open, held by the shell so back and forward walk it. */
   tab?: string;
   onTab: (tab: string) => void;
-  onBack: () => void;
+  /** Back to the Campaigns list, which is not the same thing as history: the topbar's back
+   *  walks where you actually came from, and this one goes where its label says. */
+  onBackToCampaigns: () => void;
   onDeleted: () => void;
   onDuplicated: (id: string) => void;
   onOpenThread: (messageId: string) => void;
@@ -141,7 +143,7 @@ export function Campaign({
   tell,
   tab: wantedTab,
   onTab,
-  onBack,
+  onBackToCampaigns,
   onDeleted,
   onDuplicated,
   onOpenThread,
@@ -593,7 +595,7 @@ export function Campaign({
     <div className="campaignpage">
       <PageHeader
         back={
-          <button className="linkback" type="button" onClick={onBack}>
+          <button className="linkback" type="button" onClick={onBackToCampaigns}>
             <ArrowLeft />
             Campaigns
           </button>
