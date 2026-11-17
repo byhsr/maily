@@ -3042,6 +3042,17 @@ async fn pause_campaign(state: State<'_, AppState>, campaign_id: String) -> Resu
 #[tauri::command]
 async fn delete_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<()> {
     let mut tx = state.db.begin().await.map_err(err)?;
+    // The send history holds a foreign key to the jobs it came from, so it goes first: the
+    // queue cannot be cleared while a send still points into it. This is also why a campaign
+    // that has never sent could always be deleted and one that has could not.
+    sqlx::query(
+        "DELETE FROM send_logs WHERE campaign_id=? OR job_id IN (SELECT id FROM jobs WHERE idempotency_key LIKE ?)",
+    )
+    .bind(&campaign_id)
+    .bind(format!("{}:%", campaign_id))
+    .execute(&mut *tx)
+    .await
+    .map_err(err)?;
     // Queued sends are keyed by `campaign:lead:...`, so clear them before the campaign
     // row goes away and the scheduler can no longer resolve it.
     sqlx::query("DELETE FROM jobs WHERE idempotency_key LIKE ?")
@@ -3082,10 +3093,12 @@ async fn delete_campaign(state: State<'_, AppState>, campaign_id: String) -> Res
 async fn process_due(st: &AppState) -> Result<()> {
     reset_sent_today(st).await;
 
-    // A single (`kind='single'`) has no template — its body lives on each step — but it
-    // runs through this same tick, because a follow-up is a follow-up.
+    // Every live campaign is considered, whatever it was built from: the first touch lives
+    // on the campaign itself now, so a campaign no longer needs a template to be sent.
+    // Whether it has a message worth sending is decided where the send happens, and a send
+    // that finds none leaves the campaign alone rather than dropping it from the tick.
     let campaigns = sqlx::query(
-        "SELECT id,status,account_id,interval_minutes,last_sent_at,workspace_id,scheduled_at,daily_cap FROM campaigns WHERE status IN ('active','throttled') AND (template_id IS NOT NULL OR kind='single')",
+        "SELECT id,status,account_id,interval_minutes,last_sent_at,workspace_id,scheduled_at,daily_cap FROM campaigns WHERE status IN ('active','throttled')",
     )
     .fetch_all(&st.db)
     .await
