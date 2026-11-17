@@ -265,6 +265,10 @@ struct LeadInput {
     website: Option<String>,
     list_name: Option<String>,
     custom_fields: Option<Value>,
+    /// How the lead arrived: 'import' for a spreadsheet row, 'manual' for one typed in.
+    /// It is what tells the Leads page a list from a person, so it is only written when a
+    /// lead is first created — a re-import never relabels one that is already there.
+    source: Option<String>,
 }
 /// The editable fields of an existing lead, changed in place by id.
 #[derive(Deserialize)]
@@ -648,7 +652,7 @@ async fn dashboard_stats(state: State<'_, AppState>, range: Option<String>) -> R
 #[tauri::command]
 async fn list_leads(state: State<'_, AppState>) -> Result<Vec<Value>> {
     let ws = active_workspace(&state.db).await;
-    sqlx::query("SELECT id,email,first_name,last_name,company,title,website,list_name,status,custom_fields FROM leads WHERE workspace_id=? ORDER BY created_at DESC").bind(&ws).fetch_all(&state.db).await.map_err(err).map(|rows| rows.into_iter().map(|r| json!({"id":r.get::<String,_>("id"),"email":r.get::<String,_>("email"),"first_name":r.get::<Option<String>,_>("first_name"),"last_name":r.get::<Option<String>,_>("last_name"),"company":r.get::<Option<String>,_>("company"),"title":r.get::<Option<String>,_>("title"),"website":r.get::<Option<String>,_>("website"),"list_name":r.get::<String,_>("list_name"),"status":r.get::<String,_>("status"),"custom_fields":serde_json::from_str::<Value>(&r.get::<String,_>("custom_fields")).unwrap_or(json!({}))})).collect())
+    sqlx::query("SELECT id,email,first_name,last_name,company,title,website,list_name,status,custom_fields,source FROM leads WHERE workspace_id=? ORDER BY created_at DESC").bind(&ws).fetch_all(&state.db).await.map_err(err).map(|rows| rows.into_iter().map(|r| json!({"id":r.get::<String,_>("id"),"email":r.get::<String,_>("email"),"first_name":r.get::<Option<String>,_>("first_name"),"last_name":r.get::<Option<String>,_>("last_name"),"company":r.get::<Option<String>,_>("company"),"title":r.get::<Option<String>,_>("title"),"website":r.get::<Option<String>,_>("website"),"list_name":r.get::<String,_>("list_name"),"status":r.get::<String,_>("status"),"source":r.get::<Option<String>,_>("source"),"custom_fields":serde_json::from_str::<Value>(&r.get::<String,_>("custom_fields")).unwrap_or(json!({}))})).collect())
 }
 #[tauri::command]
 async fn upsert_leads(state: State<'_, AppState>, leads: Vec<LeadInput>) -> Result<usize> {
@@ -674,7 +678,7 @@ async fn upsert_leads(state: State<'_, AppState>, leads: Vec<LeadInput>) -> Resu
         // A lead email is unique across the database, so the update is guarded by the
         // workspace: the same address in another workspace is left exactly as it was
         // rather than being pulled across.
-        sqlx::query("INSERT INTO leads(id,email,first_name,last_name,company,title,website,list_name,custom_fields,workspace_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET first_name=excluded.first_name,last_name=excluded.last_name,company=excluded.company,title=excluded.title,website=excluded.website,list_name=excluded.list_name,custom_fields=excluded.custom_fields,updated_at=excluded.updated_at WHERE leads.workspace_id=excluded.workspace_id")
+        sqlx::query("INSERT INTO leads(id,email,first_name,last_name,company,title,website,list_name,custom_fields,source,workspace_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET first_name=excluded.first_name,last_name=excluded.last_name,company=excluded.company,title=excluded.title,website=excluded.website,list_name=excluded.list_name,custom_fields=excluded.custom_fields,updated_at=excluded.updated_at WHERE leads.workspace_id=excluded.workspace_id")
             .bind(id())
             .bind(email)
             .bind(l.first_name)
@@ -684,6 +688,7 @@ async fn upsert_leads(state: State<'_, AppState>, leads: Vec<LeadInput>) -> Resu
             .bind(l.website)
             .bind(l.list_name.unwrap_or_else(||"Unassigned".into()))
             .bind(l.custom_fields.unwrap_or(json!({})).to_string())
+            .bind(l.source.unwrap_or_else(|| "manual".into()))
             .bind(&ws)
             .bind(&t)
             .bind(&t)

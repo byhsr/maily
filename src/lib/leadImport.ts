@@ -60,6 +60,9 @@ export function mapRowsWith(
       company: at(row, "company"),
       title: at(row, "title"),
       list_name: listName,
+      // The whole file arrives together, so these are a list rather than a crowd of
+      // individuals: the Leads page shows the list and its count.
+      source: "import",
       custom_fields: row,
     }))
     .filter((row) => row.email);

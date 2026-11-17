@@ -142,6 +142,10 @@ export type Lead = {
   title?: string;
   list_name?: string;
   status: string;
+  /** How the lead arrived: `import` for one row of a CSV/XLSX, `manual` for one typed in,
+   *  `single` for a lead the composer made for one email. It is what tells the Leads page a
+   *  list from a person. */
+  source?: string | null;
   /** The raw imported row, keyed by the CSV/XLSX header; any header is a `{{variable}}`. */
   custom_fields?: Record<string, unknown>;
 };

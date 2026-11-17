@@ -1004,6 +1004,41 @@ svg {
   height: 14px;
 }
 
+/* The row a lead was imported from, read-only: every column the sheet carried, which is
+   also every column a message can interpolate. */
+.leadfields {
+  margin-top: var(--s4);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+
+.leadfields dl {
+  display: grid;
+  gap: var(--s2);
+  margin: var(--s3) 0 0;
+}
+
+.leadfields dl > div {
+  display: grid;
+  grid-template-columns: 40% 1fr;
+  gap: var(--s2);
+  align-items: baseline;
+}
+
+.leadfields dt {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.leadfields dd {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-13);
+  overflow-wrap: anywhere;
+}
+
 .progressbar {
   height: 6px;
   margin-bottom: var(--s3);
@@ -1420,62 +1455,13 @@ svg {
   height: 14px;
 }
 
-.listchips {
+/* The heading above a sheet narrowed to one list or one search, with the way back to all of
+   it at its left. */
+.sheetlead {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--s2);
-  margin-bottom: var(--s3);
-}
-
-.listchip {
-  display: inline-flex;
   align-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--r-chip);
-  background: var(--bg-input);
-  overflow: hidden;
-}
-
-.listchip.on {
-  background: var(--bg-active);
-}
-
-.listchip-main {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
-  padding: 0 var(--s2);
-  height: 22px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font-size: var(--fs-xs);
-}
-
-.listchip-main i {
-  font-style: normal;
-  color: var(--text-faint);
-}
-
-.listchip-kill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 var(--s1);
-  height: 22px;
-  border: 0;
-  border-left: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-faint);
-}
-
-.listchip-kill:hover {
-  background: var(--bg-hover);
-  color: var(--danger);
-}
-
-.listchip-kill svg {
-  width: 14px;
-  height: 14px;
+  gap: var(--s3);
+  margin-bottom: var(--s2);
 }
 
 .actions {

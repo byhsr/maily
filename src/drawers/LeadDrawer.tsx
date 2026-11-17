@@ -19,9 +19,17 @@ type Values = Record<string, unknown>;
 export function LeadDrawer({ close, reload, tell, leads, lead }: LeadDrawerProps) {
   const [pending, setPending] = useState<Values | null>(null);
 
+  /** Every column the import kept, spelled the way the sheet spelled it. The fields above
+   *  are the lifted copies a send has to have; this is the row they were lifted from, and it
+   *  is what a message can interpolate. */
+  const fields = Object.entries(lead?.custom_fields ?? {}).map(
+    ([key, value]) => [key, value == null ? "" : String(value)] as const
+  );
+
   const commitNew = async (values: Values) => {
     try {
-      await upsertLeads([values]);
+      // Typed in one at a time, so it is a person on the Leads page, not a list.
+      await upsertLeads([{ ...values, source: "manual" }]);
       tell("Lead saved locally");
       reload();
       close();
@@ -81,6 +89,30 @@ export function LeadDrawer({ close, reload, tell, leads, lead }: LeadDrawerProps
           {lead ? "Update lead" : "Save lead"} <Check />
         </Button>
       </form>
+
+      {fields.length > 0 && (
+        <section className="leadfields">
+          <span className="raillabel">From the sheet</span>
+          <small>
+            The imported row, kept whole — every column it had, not only the ones a send needs.
+            Any of them can go in a message as a variable, e.g.{" "}
+            <b>
+              {"{{"}
+              {fields[0][0]}
+              {"}}"}
+            </b>
+            . They are read from the file, so they are not edited here.
+          </small>
+          <dl>
+            {fields.map(([key, value]) => (
+              <div key={key}>
+                <dt>{key}</dt>
+                <dd>{value || "—"}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
 
       {pending && (
         <Confirm
