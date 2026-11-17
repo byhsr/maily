@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { ChevronRight, Plus, Trash2 } from "lucide-react";
 import { deleteLead, deleteLeadList } from "../lib/api";
-import { importLeads } from "../lib/leadImport";
+import { detectMapping, importMapped, readSheet, type LeadMapping } from "../lib/leadImport";
 import type { Lead } from "../lib/types";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
@@ -9,6 +9,7 @@ import { Confirm } from "../ui/Confirm";
 import { EmptyState } from "../ui/EmptyState";
 import { Input } from "../ui/Input";
 import { PageHeader } from "../ui/PageHeader";
+import { Select } from "../ui/Select";
 
 type LeadsProps = {
   leads: Lead[];
@@ -108,15 +109,39 @@ export function Leads({ leads, open, onEdit, reload, tell }: LeadsProps) {
   const [listFilter, setListFilter] = useState("");
   const [killLead, setKillLead] = useState<Lead | null>(null);
   const [killList, setKillList] = useState<string | null>(null);
+  const [pending, setPending] = useState<{
+    name: string;
+    headers: string[];
+    records: Record<string, unknown>[];
+  } | null>(null);
+  const [mapping, setMapping] = useState<LeadMapping>({});
 
-  const importFile = async (file: File) => {
+  /** Read the file, then confirm which column is the email before anything is written. The
+   *  email column is guessed from its heading, so the common sheet needs one glance. */
+  const readFile = async (file: File) => {
+    try {
+      const { headers, records } = await readSheet(file);
+      setPending({ name: file.name, headers, records });
+      setMapping(detectMapping(headers));
+    } catch (e) {
+      tell(`Could not read that file: ${String(e)}`);
+    }
+  };
+
+  const doImport = async () => {
+    if (!pending) return;
+    if (!mapping.email) {
+      tell("Choose the column that holds the email address");
+      return;
+    }
     try {
       // Each file becomes a list of its own, named after it: two sheets imported one after
       // the other are two lists in a campaign's audience picker, not one that grew. A typed
       // name overrides that, which is how a file is deliberately added to a list — so the
       // box is cleared after every import and cannot carry over by accident.
-      const target = listName.trim() || file.name.replace(/\.[^.]+$/, "").trim() || "Imported";
-      const n = await importLeads(file, target);
+      const target = listName.trim() || pending.name.replace(/\.[^.]+$/, "").trim() || "Imported";
+      const n = await importMapped(pending.records, target, mapping);
+      setPending(null);
       setListName("");
       tell(`${n} leads imported into “${target}”; duplicates were updated.`);
       reload();
@@ -198,7 +223,16 @@ export function Leads({ leads, open, onEdit, reload, tell }: LeadsProps) {
             />
             <label className="btn-secondary">
               Import
-              <Input type="file" hidden accept=".csv,.xlsx,.xls" onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
+              <Input
+                type="file"
+                hidden
+                accept=".csv,.xlsx,.xls"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) readFile(file);
+                  e.target.value = "";
+                }}
+              />
             </label>
           </>
         }
@@ -270,6 +304,58 @@ export function Leads({ leads, open, onEdit, reload, tell }: LeadsProps) {
           </>
         )}
       </section>
+
+      {pending && (
+        <div className="confirm" onMouseDown={() => setPending(null)}>
+          <div className="confirm-card mapcard" onMouseDown={(event) => event.stopPropagation()}>
+            <h3>Map columns</h3>
+            <p>
+              Which column holds the email — everything else still reaches a message as a{" "}
+              <code>{"{{variable}}"}</code>. The email is guessed from its heading; change it if the
+              guess is wrong.
+            </p>
+            {(
+              [
+                ["email", "Email"],
+                ["first_name", "First name"],
+                ["last_name", "Last name"],
+                ["company", "Company"],
+                ["title", "Title"],
+              ] as [keyof LeadMapping, string][]
+            ).map(([field, label]) => (
+              <div className="srow" key={field}>
+                <label htmlFor={`lead-map-${field}`}>{label}</label>
+                <Select
+                  className="wide"
+                  label={label}
+                  value={mapping[field] ?? ""}
+                  options={[
+                    { value: "", label: "Not in this sheet" },
+                    ...pending.headers.map((header) => ({ value: header, label: header })),
+                  ]}
+                  onChange={(value) => setMapping((current) => ({ ...current, [field]: value || undefined }))}
+                />
+              </div>
+            ))}
+            <p className="muted">
+              {mapping.email
+                ? `${pending.records.length} rows · email from “${mapping.email}”`
+                : "No email column chosen yet — nothing can be sent without one."}
+            </p>
+            <div className="confirm-actions">
+              <button type="button" onClick={() => setMapping(detectMapping(pending.headers))}>
+                Sync from headings
+              </button>
+              <button type="button" onClick={() => setPending(null)}>
+                Cancel
+              </button>
+              <button type="button" className="primary" disabled={!mapping.email} onClick={doImport}>
+                Import {pending.records.length} leads
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {killLead && (
         <Confirm

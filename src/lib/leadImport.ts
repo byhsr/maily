@@ -11,12 +11,61 @@ export type LeadMapping = {
   title?: string;
 };
 
-const ALIASES: Record<keyof LeadMapping, string[]> = {
-  email: ["email", "Email", "EMAIL"],
-  first_name: ["first_name", "First Name", "FirstName"],
-  last_name: ["last_name", "Last Name", "LastName"],
-  company: ["company", "Company"],
-  title: ["title", "Title"],
+/** A header reduced to letters and digits, so "Work E-mail", "work_email" and "WorkEmail"
+ *  are all one word and one comparison can see them as the same column. */
+export function headerKey(header: string): string {
+  return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The spellings an email column is known by, best first. A header that merely contains
+ *  "email" (work email, billing email, e-mail…) is scored below these but still found. */
+const EMAIL_ALIASES = [
+  "email",
+  "emails",
+  "emailaddress",
+  "emailaddr",
+  "emailid",
+  "workemail",
+  "workmail",
+  "businessemail",
+  "contactemail",
+  "primaryemail",
+  "useremail",
+  "mail",
+];
+
+/** How likely a header names the email column: higher is better, 0 means it is not one. */
+export function emailScore(header: string): number {
+  const key = headerKey(header);
+  if (!key) return 0;
+  const exact = EMAIL_ALIASES.indexOf(key);
+  if (exact >= 0) return 100 - exact;
+  if (key.startsWith("email")) return 80;
+  if (key.endsWith("email")) return 70;
+  if (key.includes("email")) return 60;
+  return 0;
+}
+
+/** The best email column a set of headers offers, or undefined when none looks like one. */
+export function detectEmailField(headers: string[]): string | undefined {
+  let best: string | undefined;
+  let score = 0;
+  for (const header of headers) {
+    const value = emailScore(header);
+    if (value > score) {
+      score = value;
+      best = header;
+    }
+  }
+  return best;
+}
+
+/** The other identity fields' usual spellings, compared after `headerKey`. */
+const FIELD_ALIASES: Record<Exclude<keyof LeadMapping, "email">, string[]> = {
+  first_name: ["firstname", "first", "givenname", "fname", "forename"],
+  last_name: ["lastname", "last", "surname", "familyname", "lname"],
+  company: ["company", "companyname", "organization", "organisation", "org", "employer", "accountname", "business"],
+  title: ["title", "jobtitle", "role", "position", "jobrole", "designation"],
 };
 
 /** The header row, so a mapping step can offer the sheet's own columns. */
@@ -31,11 +80,15 @@ export async function readSheet(
   return { headers, records };
 }
 
-/** The column each identity field should read, by name or by its usual aliases. */
+/** The column each identity field should read. The email column is whichever header looks
+ *  most like an address; the rest match their usual spellings, whitespace and case ignored. */
 export function detectMapping(headers: string[]): LeadMapping {
   const found: LeadMapping = {};
-  for (const field of Object.keys(ALIASES) as (keyof LeadMapping)[]) {
-    const hit = headers.find((header) => ALIASES[field].includes(header.trim()));
+  const email = detectEmailField(headers);
+  if (email) found.email = email;
+  for (const field of Object.keys(FIELD_ALIASES) as Exclude<keyof LeadMapping, "email">[]) {
+    const aliases = FIELD_ALIASES[field];
+    const hit = headers.find((header) => aliases.includes(headerKey(header)));
     if (hit) found[field] = hit;
   }
   return found;

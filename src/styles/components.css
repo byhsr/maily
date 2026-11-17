@@ -702,6 +702,33 @@ svg {
   height: 14px;
 }
 
+/* The one labelled control on a campaign card: straight to its numbers. */
+.cardhead .cardaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-chip);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  transition:
+    background-color var(--motion) var(--ease-out),
+    color var(--motion) var(--ease-out);
+}
+
+.cardhead .cardaction:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.cardhead .cardaction svg {
+  width: 14px;
+  height: 14px;
+}
+
 .cardbody {
   position: relative;
   display: flex;
@@ -1004,39 +1031,34 @@ svg {
   height: 14px;
 }
 
-/* The row a lead was imported from, read-only: every column the sheet carried, which is
-   also every column a message can interpolate. */
+/* The fields a lead carries, editable: every variable a message can interpolate. */
 .leadfields {
   margin-top: var(--s4);
   padding-top: var(--s3);
   border-top: 1px solid var(--border);
 }
 
-.leadfields dl {
+.fieldlist {
   display: grid;
   gap: var(--s2);
-  margin: var(--s3) 0 0;
+  margin: var(--s3) 0;
 }
 
-.leadfields dl > div {
+.fieldpair {
   display: grid;
-  grid-template-columns: 40% 1fr;
+  grid-template-columns: 40% minmax(0, 1fr) auto;
   gap: var(--s2);
-  align-items: baseline;
+  align-items: center;
 }
 
-.leadfields dt {
+.fieldkey {
   color: var(--text-faint);
   font-size: var(--fs-xs);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  overflow-wrap: anywhere;
 }
 
-.leadfields dd {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--fs-13);
-  overflow-wrap: anywhere;
+.fieldpair input {
+  min-width: 0;
 }
 
 .progressbar {
@@ -3554,7 +3576,7 @@ hr {
 }
 
 .fuftext {
-  min-height: 96px;
+  min-height: 200px;
   padding: var(--s3);
   border: 1px solid var(--border);
   border-radius: var(--r-input);
@@ -3609,6 +3631,82 @@ hr {
   background: var(--bg-card);
   color: var(--text);
   font-size: var(--fs-13);
+}
+
+/* A field the variable picker is anchored to. */
+.varfield {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* `{{` opens this: the variables the audience can actually fill. */
+.varmenu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% - 4px);
+  left: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  max-width: 100%;
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  background: var(--bg-card);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.4);
+}
+
+.varmenu button {
+  padding: 2px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.varmenu button.on,
+.varmenu button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* The first email's toolbar: the same row a follow-up card already carries. */
+.seqtools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+/* The audience picker, sat above the launch checklist in the rail. */
+.sideaudience {
+  gap: var(--s3);
+}
+
+.sidefield {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.sidefield > label {
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+.sideaudience .select {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.sideaudience .dropzone,
+.sideaudience .filerow {
+  max-width: none;
 }
 
 /* A release waiting to be installed. The only chrome the updater ever shows. */
@@ -4703,7 +4801,7 @@ input[type="radio"]:checked {
 }
 
 .seqbody {
-  min-height: 120px;
+  min-height: 260px;
   padding: var(--s3);
   border: 1px solid var(--border);
   border-radius: var(--r-input);
