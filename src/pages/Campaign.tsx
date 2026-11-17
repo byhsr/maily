@@ -6,9 +6,10 @@ import {
   Circle,
   Copy,
   Download,
+  Eye,
+  EyeOff,
   FileUp,
   Pause,
-  Pencil,
   Play,
   Plus,
   Trash2,
@@ -47,11 +48,13 @@ import { Button } from "../ui/Button";
 import { Checkbox } from "../ui/Checkbox";
 import { Confirm } from "../ui/Confirm";
 import { FollowupCard } from "../ui/FollowupCard";
+import { FormatToolbar } from "../ui/FormatToolbar";
 import { Input } from "../ui/Input";
 import { OverflowMenu } from "../ui/OverflowMenu";
 import { PageHeader } from "../ui/PageHeader";
 import { Select } from "../ui/Select";
 import { Tooltip } from "../ui/Tooltip";
+import { useVariableSuggest, VariableInput, VariableMenu } from "../ui/VariableTextarea";
 
 type CampaignProps = {
   campaign: CampaignType;
@@ -71,8 +74,18 @@ type CampaignProps = {
   onOpenThread: (messageId: string) => void;
 };
 
-const TABS = ["setup", "activity", "leads"] as const;
+const TABS = ["sequence", "sending", "leads"] as const;
 type Tab = (typeof TABS)[number];
+
+const TAB_LABEL: Record<Tab, string> = {
+  sequence: "Sequence",
+  sending: "Sending",
+  leads: "Leads",
+};
+
+/** The two panes the sequence editor switches between, the way the composer switches
+ *  between a message and its follow-ups. */
+type SeqTab = "first" | "followups";
 
 const STATUS_LABEL: Record<string, string> = {
   draft: "Draft",
@@ -95,6 +108,7 @@ type DraftStep = {
 
 const DAY_MINUTES = 1440;
 const MAX_FOLLOWUPS = 5;
+const MAX_SUBJECTS = 5;
 const STOP_DEFAULTS: StopRules = { reply: true, bounce: true, ooo: true };
 
 function when(iso?: string | null): string {
@@ -152,7 +166,9 @@ export function Campaign({
   const [name, setName] = useState(campaign.name);
   const [listName, setListName] = useState(campaign.list_name ?? "");
   const [templateId, setTemplateId] = useState(campaign.template_id ?? "");
-  const [subject, setSubject] = useState(campaign.subject ?? "");
+  /** The first-touch subject lines. One is an ordinary subject; more than one and the
+   *  audience is split across them, which is the A/B test. */
+  const [subjects, setSubjects] = useState<string[]>([campaign.subject ?? ""]);
   const [body, setBody] = useState(campaign.body ?? "");
   const [interval, setIntervalMinutes] = useState(String(campaign.interval_minutes ?? 5));
   const [accountId, setAccountId] = useState(campaign.account_id ?? "");
@@ -174,7 +190,10 @@ export function Campaign({
       : ZONES;
   }, []);
   const [steps, setSteps] = useState<DraftStep[]>([]);
-  const [firstOpen, setFirstOpen] = useState(false);
+  /** Which pane of the sequence is open: the first email, or the follow-ups. */
+  const [seqTab, setSeqTab] = useState<SeqTab>("first");
+  /** Whether the first email's preview is showing beside the writing. */
+  const [firstPreview, setFirstPreview] = useState(true);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [lists, setLists] = useState<LeadList[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -194,10 +213,22 @@ export function Campaign({
   const [statusFilter, setStatusFilter] = useState("All");
   const [picked, setPicked] = useState<string[]>([]);
 
+  /** The line the sequence reads as "email 1's subject": the first that was actually
+   *  written, so an empty first slot with a filled second still reads as having one. */
+  const subject = subjects.find((line) => line.trim()) ?? "";
+  const setSubjectAt = (index: number, value: string) =>
+    setSubjects((current) => current.map((line, at) => (at === index ? value : line)));
+  const addSubject = () =>
+    setSubjects((current) => (current.length >= MAX_SUBJECTS ? current : [...current, ""]));
+  const removeSubject = (index: number) =>
+    setSubjects((current) => current.filter((_, at) => at !== index));
+
   const seeded = useRef("");
   const skipSave = useRef(true);
   const dragFrom = useRef<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  /** The first email's body, so the toolbar and the picker can act on it. */
+  const firstBody = useRef<HTMLTextAreaElement | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -242,7 +273,9 @@ export function Campaign({
         send_date: step.send_date ?? null,
       }))
     );
-    setSubject(detail.campaign.subject ?? "");
+    setSubjects(
+      detail.subjects && detail.subjects.length ? detail.subjects : [detail.campaign.subject ?? ""]
+    );
     setBody(detail.campaign.body ?? "");
     setStopRules(detail.stop_rules ?? STOP_DEFAULTS);
     setCapText(detail.campaign.daily_cap ? String(detail.campaign.daily_cap) : "");
@@ -255,7 +288,10 @@ export function Campaign({
       id: campaign.id,
       name: name.trim() || "Untitled campaign",
       template_id: templateId || null,
-      subject: subject.trim() || null,
+      subject: subjects[0]?.trim() || null,
+      // Every line, in order. The first is the campaign's own subject; the rest are the A/B
+      // challengers the audience is split across.
+      subjects: subjects.map((line) => line.trim()).filter(Boolean),
       body: body || null,
       list_name: listName || null,
       interval_minutes: Number(interval) || 5,
@@ -267,7 +303,7 @@ export function Campaign({
       scheduled_at: scheduledAt,
       timezone: scheduledAt ? schedZone : null,
     }),
-    [campaign.id, name, templateId, subject, body, listName, interval, accountId, stopRules, capText, scheduledAt, schedZone]
+    [campaign.id, name, templateId, subjects, body, listName, interval, accountId, stopRules, capText, scheduledAt, schedZone]
   );
 
   const persist = useCallback(
@@ -314,11 +350,14 @@ export function Campaign({
   const patchStep = (index: number, patch: Partial<DraftStep>) =>
     setSteps((current) => current.map((step, at) => (at === index ? { ...step, ...patch } : step)));
 
-  const addStep = () =>
+  // The plus opens the pane it created, which is where the follow-up is written.
+  const addStep = () => {
     setSteps((current) => [
       ...current,
       { template_id: "", subject: "", body: "", delay_minutes: 3 * DAY_MINUTES, send_date: null },
     ]);
+    setSeqTab("followups");
+  };
 
   const removeStep = (index: number) => setSteps((current) => current.filter((_, at) => at !== index));
 
@@ -352,14 +391,20 @@ export function Campaign({
   );
   const emails = 1 + steps.length;
 
-  /** Variables the messages ask for with no fallback — the ones a lead must supply. */
-  const missing = useMemo(() => {
-    const asked = new Set<string>();
-    for (const text of [subject, body, ...steps.map((step) => `${step.subject}\n${step.body}`)]) {
-      for (const key of missingVariables(text, {})) asked.add(key);
+  /** What a message may interpolate for the list being written to: exactly the headers the
+   *  selected file carried, taken from the leads in the audience rather than a fixed list. */
+  const audienceVariables = useMemo(() => {
+    const keys = new Set<string>();
+    for (const lead of audience) {
+      for (const [key, value] of Object.entries(lead.custom_fields ?? {})) {
+        if (key.trim() && String(value ?? "").trim()) keys.add(key);
+      }
     }
-    return [...asked];
-  }, [subject, body, steps]);
+    return [...keys].sort((one, two) => one.localeCompare(two));
+  }, [audience]);
+
+  // `{{` opens the picker as it is typed, from the audience's own variables.
+  const firstSuggest = useVariableSuggest(audienceVariables, setBody);
 
   /** One lead's values, so a follow-up's score reads the copy as it will be sent rather
    *  than flagging every {{variable}} in it. Coverage is the checklist's job, not the score's. */
@@ -392,13 +437,31 @@ export function Campaign({
     [audience]
   );
 
+  /** The variables a message asks for with no fallback that at least one lead in the
+   *  audience cannot supply. A variable every lead has is not a problem, so it is not
+   *  listed — only the ones that would actually go out blank for someone. */
+  const missing = useMemo(() => {
+    const asked = new Set<string>();
+    for (const text of [...subjects, body, ...steps.map((step) => `${step.subject}\n${step.body}`)]) {
+      for (const key of missingVariables(text, {})) asked.add(key);
+    }
+    return [...asked].filter((key) => lacking(key) > 0);
+  }, [subjects, body, steps, lacking]);
+
   const checks = [
     {
       id: "audience",
       label: `Audience selected — ${audience.length} lead${audience.length === 1 ? "" : "s"}`,
       ok: audience.length > 0,
     },
-    { id: "first", label: "Email 1 has a subject and a message", ok: !!subject.trim() && !!body.trim() },
+    {
+      id: "first",
+      label:
+        subjects.length > 1
+          ? `Email 1 has ${subjects.length} subject lines, tested against each other`
+          : "Email 1 has a subject and a message",
+      ok: subjects.some((line) => line.trim()) && !!body.trim(),
+    },
     {
       id: "steps",
       label: steps.length ? `All ${steps.length} follow-up${steps.length === 1 ? "" : "s"} have a message` : "No follow-ups (optional)",
@@ -472,6 +535,8 @@ export function Campaign({
             : "Campaign resumed"
       );
       setLaunching(false);
+      // Launched: back to the campaigns list, where its card now carries the numbers.
+      onBackToCampaigns();
     });
 
   const pause = () =>
@@ -513,9 +578,10 @@ export function Campaign({
     try {
       const { headers, records } = await readSheet(file);
       setPending({ file: file.name, headers, records });
-      setMapping(detectMapping(headers));
+      const found = detectMapping(headers);
+      setMapping(found);
       // Without an email column nothing can be addressed, so go straight to the mapping.
-      setMappingOpen(!headers.some((header) => header.trim().toLowerCase() === "email"));
+      setMappingOpen(!found.email);
     } catch (e) {
       tell(String(e));
     } finally {
@@ -553,6 +619,7 @@ export function Campaign({
   const rows = detail?.leads ?? [];
   const bounced = detail?.bounced ?? [];
   const funnel = detail?.funnel ?? [];
+  const subjectStats = detail?.subject_stats ?? [];
   const recent = detail?.recent ?? [];
   const stats = detail?.stats ?? { sent: 0, replied: 0, positive: 0, bounced: 0 };
   const counts = detail?.counts ?? {};
@@ -572,14 +639,10 @@ export function Campaign({
     .sort()[0];
   const replyRate = stats.sent ? Math.round((stats.replied / stats.sent) * 100) : 0;
 
-  const tab: Tab =
-    wantedTab === "setup" || wantedTab === "activity" || wantedTab === "leads"
-      ? wantedTab
-      : status === "draft"
-        ? "setup"
-        : "activity";
-
-  const showText = (value: string) => (value.trim() ? value.split("\n")[0] : "No message yet");
+  /** Analytics is a view of its own, reached from a campaign's Analytics button rather than
+   *  sitting among the setup tabs. Everything else on this page is setup. */
+  const analytics = wantedTab === "activity";
+  const tab: Tab = TABS.includes(wantedTab as Tab) ? (wantedTab as Tab) : "sequence";
 
   const filtered = rows.filter((row) => {
     const state = leadStatus(row, bounced, emails);
@@ -590,6 +653,91 @@ export function Campaign({
       (field ?? "").toLowerCase().includes(needle)
     );
   });
+
+  /** The rail both setup tabs share: who the campaign writes to, and what it still needs. */
+  const setupAside = (
+    <aside className="setupside">
+      <section className="sectioncard sideaudience">
+        <header>
+          <h2>Audience</h2>
+          <p>Who this campaign writes to.</p>
+        </header>
+        <div className="sidefield">
+          <label htmlFor="audience-list">Lead list</label>
+          <Select
+            label="Lead list"
+            value={listName}
+            options={[
+              { value: "", label: `All leads · ${leads.length}` },
+              ...lists.map((list) => ({ value: list.name, label: `${list.name} · ${list.count}` })),
+            ]}
+            onChange={setListName}
+          />
+        </div>
+        {pending ? (
+          <div className="filerow">
+            <FileUp size={14} />
+            <span className="filerowmain">
+              <b>{pending.file}</b>
+              <small>
+                {pending.records.length} rows · email from “{mapping.email ?? "not mapped"}”
+              </small>
+            </span>
+            <button type="button" className="link" onClick={() => setMappingOpen(true)}>
+              Map columns
+            </button>
+            <button type="button" className="btn-icon" aria-label="Remove file" onClick={() => setPending(null)}>
+              <X size={14} />
+            </button>
+          </div>
+        ) : (
+          <div
+            className={`dropzone${dragging ? " over" : ""}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => fileInput.current?.click()}
+            onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && fileInput.current?.click()}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+          >
+            <FileUp size={16} />
+            <span>Drop CSV or XLSX, or browse</span>
+          </div>
+        )}
+        <input ref={fileInput} type="file" accept=".csv,.xlsx,.xls" hidden onChange={onPick} />
+      </section>
+
+      <section className="sectioncard checklist">
+        <header>
+          <h2>{locked ? "Sending" : "Ready to launch"}</h2>
+        </header>
+        {checks.map((check) => (
+          <div className={`checkrow${check.ok ? " ok" : ""}`} key={check.id}>
+            {check.ok ? <Check size={16} /> : <Circle size={16} />}
+            <span>{check.label}</span>
+          </div>
+        ))}
+        <p className="checksum">{summary}</p>
+        {status === "draft" ? (
+          // The header holds the page's one primary button; this one repeats the action, so
+          // it stays a ghost rather than competing with it.
+          <Button variant="ghost" type="button" disabled={!ready} onClick={openSchedule}>
+            <Play />
+            Launch campaign
+          </Button>
+        ) : (
+          <p className="muted">
+            {STATUS_LABEL[status] ?? status}
+            {nextDue ? ` · next send in ${away(nextDue)}` : ""}
+          </p>
+        )}
+      </section>
+    </aside>
+  );
 
   return (
     <div className="campaignpage">
@@ -611,6 +759,7 @@ export function Campaign({
         }
         status={
           <>
+            {analytics && <span className="pagestatus">Analytics</span>}
             <Badge className={`statusbadge state-${pendingStart ? "scheduled" : status}`}>
               {pendingStart ? "Scheduled" : STATUS_LABEL[status] ?? status}
             </Badge>
@@ -639,22 +788,27 @@ export function Campaign({
           </>
         }
         tabs={
-          <div className="segmented">
-            {TABS.map((one) => (
-              <button
-                key={one}
-                type="button"
-                className={tab === one ? "on" : undefined}
-                onClick={() => onTab(one)}
-              >
-                {one === "setup" ? "Setup" : one === "activity" ? "Activity" : "Leads"}
-                {one === "activity" && running && counts.queued ? <em>{counts.queued}</em> : null}
-              </button>
-            ))}
-          </div>
+          analytics ? undefined : (
+            <div className="segmented">
+              {TABS.map((one) => (
+                <button
+                  key={one}
+                  type="button"
+                  className={tab === one ? "on" : undefined}
+                  onClick={() => onTab(one)}
+                >
+                  {TAB_LABEL[one]}
+                </button>
+              ))}
+            </div>
+          )
         }
         action={
-          status === "draft" ? (
+          analytics ? (
+            <Button variant="secondary" type="button" onClick={() => onTab("sequence")}>
+              Set up
+            </Button>
+          ) : status === "draft" ? (
             <Tooltip label={ready ? "Queue every lead" : `Still missing: ${blockers.join("; ")}`}>
               <span className="launchwrap">
                 <Button type="button" disabled={!ready} onClick={openSchedule}>
@@ -677,96 +831,58 @@ export function Campaign({
         }
       />
 
-      {tab === "setup" && (
+      {!analytics && tab === "sequence" && (
         <div className="setupcols">
           <div className="setupmain">
-            {locked && (
+            {running && (
               <p className="locknote">
-                This campaign has started. The first email and any step nothing has been sent to yet can
-                still be changed — an edit reaches the leads still queued and leaves the ones already
-                sent with what they got. The audience is fixed once it is running.
+                This campaign is running. Setup stays editable — the first email, the follow-ups
+                nothing has been sent to yet, the pace and the account. Only the steps already sent
+                are fixed, so those leads keep what they got.
               </p>
             )}
-
-            <section className="sectioncard">
-              <header>
-                <h2>Audience</h2>
-                <p>Who this campaign writes to.</p>
-              </header>
-              <div className="srow">
-                <label htmlFor="audience-list">Lead list</label>
-                <Select
-                  className="wide"
-                  label="Lead list"
-                  value={listName}
-                  disabled={locked}
-                  options={[
-                    { value: "", label: `All leads · ${leads.length}` },
-                    ...lists.map((list) => ({ value: list.name, label: `${list.name} · ${list.count}` })),
-                  ]}
-                  onChange={setListName}
-                />
-              </div>
-              <div className="srow">
-                <span />
-                {pending ? (
-                  <div className="filerow">
-                    <FileUp size={14} />
-                    <span className="filerowmain">
-                      <b>{pending.file}</b>
-                      <small>
-                        {pending.records.length} rows · email from “{mapping.email ?? "not mapped"}”
-                      </small>
-                    </span>
-                    <button type="button" className="link" onClick={() => setMappingOpen(true)}>
-                      Map columns
-                    </button>
-                    <button type="button" className="btn-icon" aria-label="Remove file" onClick={() => setPending(null)}>
-                      <X size={14} />
-                    </button>
-                  </div>
-                ) : (
-                  <div
-                    className={`dropzone${dragging ? " over" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => fileInput.current?.click()}
-                    onKeyDown={(event) => (event.key === "Enter" || event.key === " ") && fileInput.current?.click()}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      setDragging(true);
-                    }}
-                    onDragLeave={() => setDragging(false)}
-                    onDrop={onDrop}
-                  >
-                    <FileUp size={16} />
-                    <span>Drop CSV or XLSX, or browse</span>
-                  </div>
-                )}
-                <input ref={fileInput} type="file" accept=".csv,.xlsx,.xls" hidden onChange={onPick} />
-              </div>
-            </section>
 
             <section className="sectioncard">
               <header>
                 <h2>Sequence</h2>
                 <p>What goes out, and how long it waits.</p>
               </header>
-              <div className="timeline">
-                <div className="tstep">
-                  <span className="tdot" />
-                  <div className="tcard">
-                    <div className="tcardhead">
-                      <b>Email 1 · First touch</b>
-                      <Tooltip label={firstOpen ? "Close the editor" : "Write this email"}>
-                        <button type="button" className="btn-ghost" onClick={() => setFirstOpen((open) => !open)}>
-                          <Pencil size={13} />
-                          {firstOpen ? "Done" : "Edit"}
-                        </button>
-                      </Tooltip>
-                    </div>
-                    {firstOpen ? (
-                      <div className="tcardbody">
+
+              {/* The two panes of the sequence, switched the way the composer switches
+                  between a message and its follow-ups. */}
+              <div className="composertabs" role="tablist" aria-label="Sequence">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={seqTab === "first"}
+                  className={`composertab${seqTab === "first" ? " on" : ""}`}
+                  onClick={() => setSeqTab("first")}
+                >
+                  Email 1
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={seqTab === "followups"}
+                  className={`composertab${seqTab === "followups" ? " on" : ""}`}
+                  onClick={() => setSeqTab("followups")}
+                >
+                  Follow-ups{steps.length ? ` (${steps.length})` : ""}
+                </button>
+                {steps.length < MAX_FOLLOWUPS && (
+                  <Tooltip label="Add a follow-up">
+                    <button type="button" className="composertabadd" aria-label="Add a follow-up" onClick={addStep}>
+                      <Plus size={14} />
+                    </button>
+                  </Tooltip>
+                )}
+              </div>
+
+              {seqTab === "first" ? (
+                <div className="seqstep on">
+                  <div className="seqstephead">
+                    <b>Email 1 · First touch</b>
+                  </div>
                         <Select
                           className="wide"
                           label="Copy a template into email 1"
@@ -779,143 +895,220 @@ export function Campaign({
                             // template later cannot change what this campaign sends.
                             const chosen = templates.find((t) => t.id === value);
                             if (chosen) {
-                              setSubject(chosen.subject);
+                              // The template supplies the first line; challengers the user
+                              // has already added are left in place.
+                              setSubjects((current) => [chosen.subject, ...current.slice(1)]);
                               setBody(chosen.body);
                             }
                           }}
                         />
-                        <Input
-                          value={subject}
-                          disabled={firstLocked}
-                          aria-label="Email 1 subject"
-                          placeholder="Subject — a quick idea for {{company}}"
-                          onChange={(event) => setSubject(event.target.value)}
-                        />
-                        <textarea
-                          className="seqbody"
-                          value={body}
-                          disabled={firstLocked}
-                          aria-label="Email 1 message"
-                          placeholder={"Hi {{first_name|there}},\n\nI noticed {{company}}…"}
-                          onChange={(event) => setBody(event.target.value)}
-                        />
+                        <div className="subjectlines">
+                          {subjects.map((line, index) => (
+                            <div className="subjectline" key={index}>
+                              {subjects.length > 1 && (
+                                <span className="subjecttag">{String.fromCharCode(65 + index)}</span>
+                              )}
+                              <VariableInput
+                                variables={audienceVariables}
+                                value={line}
+                                disabled={firstLocked}
+                                aria-label={
+                                  index === 0 ? "Email 1 subject" : `Email 1 subject variant ${index + 1}`
+                                }
+                                placeholder={
+                                  index === 0
+                                    ? "Subject — a quick idea for {{company}}"
+                                    : "Another subject line to test…"
+                                }
+                                onChange={(next) => setSubjectAt(index, next)}
+                              />
+                              {subjects.length > 1 && !firstLocked && (
+                                <button
+                                  type="button"
+                                  className="btn-icon"
+                                  aria-label={`Remove subject line ${String.fromCharCode(65 + index)}`}
+                                  onClick={() => removeSubject(index)}
+                                >
+                                  <X size={14} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                          {!firstLocked && subjects.length < MAX_SUBJECTS && (
+                            <Button variant="ghost" type="button" onClick={addSubject}>
+                              <Plus />
+                              Add subject line
+                            </Button>
+                          )}
+                          {subjects.length > 1 && (
+                            <small className="tnote">
+                              A/B test: the audience is split evenly across these {subjects.length} lines
+                              and each lead keeps the one it was given. Watch them under Activity once it
+                              sends.
+                            </small>
+                          )}
+                        </div>
+                        <div className="varfield">
+                          <textarea
+                            ref={firstBody}
+                            className="seqbody"
+                            value={body}
+                            disabled={firstLocked}
+                            aria-label="Email 1 message"
+                            placeholder={"Hi {{first_name|there}},\n\nI noticed {{company}}… — type {{ for the variables"}
+                            onChange={(event) => {
+                              setBody(event.target.value);
+                              firstSuggest.sync(event.target);
+                            }}
+                            onKeyDown={(event) => firstSuggest.onKeyDown(event.currentTarget, event)}
+                          />
+                          <VariableMenu
+                            suggest={firstSuggest}
+                            onPick={(key) => firstSuggest.choose(firstBody.current, key)}
+                          />
+                        </div>
+                        <div className="seqtools">
+                          <FormatToolbar target={firstBody} value={body} onChange={setBody} disabled={firstLocked} />
+                          <Tooltip label={firstPreview ? "Hide the preview" : "See it as one lead will read it"}>
+                            <button
+                              type="button"
+                              className={`composerpreviewtoggle${firstPreview ? " on" : ""}`}
+                              aria-pressed={firstPreview}
+                              onClick={() => setFirstPreview((shown) => !shown)}
+                            >
+                              {firstPreview ? <EyeOff size={14} /> : <Eye size={14} />}
+                              {firstPreview ? "Hide preview" : "Preview"}
+                            </button>
+                          </Tooltip>
+                        </div>
+                        {firstPreview && (
+                          <div
+                            className="fufpreview mdarticle"
+                            aria-label="How the first email will read"
+                            dangerouslySetInnerHTML={{ __html: previewEmailMarkdown(body, sampleValues) }}
+                          />
+                        )}
                         {sentFirst > 0 && !firstLocked && (
                           <small className="tnote">
                             Already sent to {sentFirst} {sentFirst === 1 ? "lead" : "leads"} — every lead still
                             queued gets this version.
                           </small>
                         )}
-                      </div>
-                    ) : (
-                      <p className="tpreview">
-                        <b>{subject.trim() || "No subject yet"}</b>
-                        <small>{showText(body)}</small>
+                </div>
+              ) : (
+                <>
+                  <div className="timeline">
+                    {steps.length === 0 && (
+                      <p className="muted">
+                        No follow-ups yet. Add one and it goes out in the first email's thread once the wait is
+                        up.
                       </p>
                     )}
+                    {steps.map((step, index) => {
+                      const stepSent = funnel.find((one) => one.position === index + 1)?.sent ?? 0;
+                      const stepLocked = locked && stepSent > 0;
+                      const days = Math.max(0, Math.round(step.delay_minutes / DAY_MINUTES));
+                      return (
+                        <div className="tstep" key={index}>
+                          <span className="tdot" />
+                          {/* A step either waits a number of days or sits on a calendar day. */}
+                          <div className="tconnect">
+                            {step.send_date
+                              ? `sends ${step.send_date}`
+                              : `wait ${days} day${days === 1 ? "" : "s"}`}
+                          </div>
+                          <FollowupCard
+                            step={{
+                              delay_days: days,
+                              body_md: step.body,
+                              subject_override: step.subject,
+                              send_date: step.send_date,
+                            }}
+                            label={`Follow-up ${index + 1}`}
+                            subject={subject}
+                            values={sampleValues}
+                            variables={audienceVariables}
+                            sent={stepSent}
+                            disabled={stepLocked}
+                            onChange={(patch) =>
+                              patchStep(index, {
+                                ...(patch.body_md !== undefined ? { body: patch.body_md } : {}),
+                                ...(patch.delay_days !== undefined
+                                  ? { delay_minutes: Math.max(0, Math.round(patch.delay_days * DAY_MINUTES)) }
+                                  : {}),
+                                ...(patch.subject_override !== undefined ? { subject: patch.subject_override } : {}),
+                                ...(patch.send_date !== undefined ? { send_date: patch.send_date } : {}),
+                              })
+                            }
+                            onRemove={() => removeStep(index)}
+                            onDragStart={() => (dragFrom.current = index)}
+                            onDrop={() => {
+                              if (dragFrom.current !== null) moveStep(dragFrom.current, index);
+                              dragFrom.current = null;
+                            }}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
-                </div>
 
-                {steps.map((step, index) => {
-                  const stepSent = funnel.find((one) => one.position === index + 1)?.sent ?? 0;
-                  const stepLocked = locked && stepSent > 0;
-                  const days = Math.max(0, Math.round(step.delay_minutes / DAY_MINUTES));
-                  return (
-                    <div className="tstep" key={index}>
-                      <span className="tdot" />
-                      {/* A step either waits a number of days or sits on a calendar day. */}
-                      <div className="tconnect">
-                        {step.send_date
-                          ? `sends ${step.send_date}`
-                          : `wait ${days} day${days === 1 ? "" : "s"}`}
-                      </div>
-                      <FollowupCard
-                        step={{
-                          delay_days: days,
-                          body_md: step.body,
-                          subject_override: step.subject,
-                          send_date: step.send_date,
-                        }}
-                        label={`Follow-up ${index + 1}`}
-                        subject={subject}
-                        values={sampleValues}
-                        sent={stepSent}
-                        disabled={stepLocked}
-                        onChange={(patch) =>
-                          patchStep(index, {
-                            ...(patch.body_md !== undefined ? { body: patch.body_md } : {}),
-                            ...(patch.delay_days !== undefined
-                              ? { delay_minutes: Math.max(0, Math.round(patch.delay_days * DAY_MINUTES)) }
-                              : {}),
-                            ...(patch.subject_override !== undefined ? { subject: patch.subject_override } : {}),
-                            ...(patch.send_date !== undefined ? { send_date: patch.send_date } : {}),
-                          })
-                        }
-                        onRemove={() => removeStep(index)}
-                        onDragStart={() => (dragFrom.current = index)}
-                        onDrop={() => {
-                          if (dragFrom.current !== null) moveStep(dragFrom.current, index);
-                          dragFrom.current = null;
-                        }}
-                      />
+                  <button type="button" className="ruleline" onClick={() => setRulesOpen((open) => !open)}>
+                    <span className="raillabel">Stop rules</span>
+                    <small>
+                      {[
+                        stopRules.reply && "reply",
+                        stopRules.bounce && "bounce/unsubscribe",
+                        stopRules.ooo && "out-of-office",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "none on"}
+                    </small>
+                  </button>
+                  {rulesOpen && (
+                    <div className="fufrules">
+                      <label className="fufrule">
+                        <Checkbox
+                          checked={stopRules.reply}
+                          onChange={(on) => setStopRules((rules) => ({ ...rules, reply: on }))}
+                          label="Stop on reply"
+                        />
+                        Stop on reply
+                      </label>
+                      <label className="fufrule">
+                        <Checkbox
+                          checked={stopRules.bounce}
+                          onChange={(on) => setStopRules((rules) => ({ ...rules, bounce: on }))}
+                          label="Stop on bounce or unsubscribe"
+                        />
+                        Stop on bounce / unsubscribe
+                      </label>
+                      <label className="fufrule">
+                        <Checkbox
+                          checked={stopRules.ooo}
+                          onChange={(on) => setStopRules((rules) => ({ ...rules, ooo: on }))}
+                          label="Pause on out-of-office"
+                        />
+                        Pause on out-of-office
+                      </label>
                     </div>
-                  );
-                })}
-              </div>
-
-              <div className="srow">
-                <span />
-                <Button
-                  variant="ghost"
-                  type="button"
-                  disabled={steps.length >= MAX_FOLLOWUPS}
-                  onClick={addStep}
-                >
-                  <Plus />
-                  Add follow-up
-                </Button>
-              </div>
-
-              <button type="button" className="ruleline" onClick={() => setRulesOpen((open) => !open)}>
-                <span className="raillabel">Stop rules</span>
-                <small>
-                  {[
-                    stopRules.reply && "reply",
-                    stopRules.bounce && "bounce/unsubscribe",
-                    stopRules.ooo && "out-of-office",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ") || "none on"}
-                </small>
-              </button>
-              {rulesOpen && (
-                <div className="fufrules">
-                  <label className="fufrule">
-                    <Checkbox
-                      checked={stopRules.reply}
-                      onChange={(on) => setStopRules((rules) => ({ ...rules, reply: on }))}
-                      label="Stop on reply"
-                    />
-                    Stop on reply
-                  </label>
-                  <label className="fufrule">
-                    <Checkbox
-                      checked={stopRules.bounce}
-                      onChange={(on) => setStopRules((rules) => ({ ...rules, bounce: on }))}
-                      label="Stop on bounce or unsubscribe"
-                    />
-                    Stop on bounce / unsubscribe
-                  </label>
-                  <label className="fufrule">
-                    <Checkbox
-                      checked={stopRules.ooo}
-                      onChange={(on) => setStopRules((rules) => ({ ...rules, ooo: on }))}
-                      label="Pause on out-of-office"
-                    />
-                    Pause on out-of-office
-                  </label>
-                </div>
+                  )}
+                </>
               )}
             </section>
+          </div>
+          {setupAside}
+        </div>
+      )}
+
+      {!analytics && tab === "sending" && (
+        <div className="setupcols">
+          <div className="setupmain">
+            {running && (
+              <p className="locknote">
+                This campaign is running. The pace, the cap and the account can still be changed —
+                they decide the next send, not the ones already on their way.
+              </p>
+            )}
 
             <section className="sectioncard">
               <header>
@@ -991,38 +1184,11 @@ export function Campaign({
               </div>
             </section>
           </div>
-
-          <aside className="setupside">
-            <section className="sectioncard checklist">
-              <header>
-                <h2>{locked ? "Sending" : ready ? "Ready to launch" : "Ready to launch"}</h2>
-              </header>
-              {checks.map((check) => (
-                <div className={`checkrow${check.ok ? " ok" : ""}`} key={check.id}>
-                  {check.ok ? <Check size={16} /> : <Circle size={16} />}
-                  <span>{check.label}</span>
-                </div>
-              ))}
-              <p className="checksum">{summary}</p>
-              {status === "draft" ? (
-                // The header holds the page's one primary button; this one repeats the
-                // action, so it stays a ghost rather than competing with it.
-                <Button variant="ghost" type="button" disabled={!ready} onClick={openSchedule}>
-                  <Play />
-                  Launch campaign
-                </Button>
-              ) : (
-                <p className="muted">
-                  {STATUS_LABEL[status] ?? status}
-                  {nextDue ? ` · next send in ${away(nextDue)}` : ""}
-                </p>
-              )}
-            </section>
-          </aside>
+          {setupAside}
         </div>
       )}
 
-      {tab === "activity" && (
+      {analytics && (
         <div className="stack">
           <div className="metrics">
             <article>
@@ -1053,6 +1219,33 @@ export function Campaign({
               {nextDue ? ` · next send in ${away(nextDue)}` : ""}
             </p>
           </section>
+
+          {subjectStats.length > 1 && (
+            <section className="sectioncard">
+              <header>
+                <h2>Subject lines</h2>
+                <p>How each line is doing. Every reply is credited to the line its lead was given.</p>
+              </header>
+              {subjectStats.map((stat) => (
+                <div className="funnelrow" key={stat.position}>
+                  <span className="funnelname">
+                    {String.fromCharCode(65 + stat.position)} · {stat.subject || "—"}
+                  </span>
+                  <span className="funnelbar">
+                    <em
+                      style={{
+                        width: `${(stat.sent / Math.max(1, ...subjectStats.map((one) => one.sent))) * 100}%`,
+                      }}
+                    />
+                  </span>
+                  <span className="funnelcount">
+                    {stat.leads} leads · {stat.sent} sent · {stat.replied} replied
+                    {stat.sent ? ` (${Math.round((stat.replied / stat.sent) * 100)}%)` : ""}
+                  </span>
+                </div>
+              ))}
+            </section>
+          )}
 
           {recent.length === 0 ? (
             <section className="sectioncard">
@@ -1120,7 +1313,7 @@ export function Campaign({
         </div>
       )}
 
-      {tab === "leads" && (
+      {!analytics && tab === "leads" && (
         <div className="stack">
           <section className="sectioncard">
             <header>
@@ -1254,6 +1447,9 @@ export function Campaign({
               </div>
             ))}
             <div className="confirm-actions">
+              <button type="button" onClick={() => setMapping(detectMapping(pending.headers))}>
+                Sync from headings
+              </button>
               <button type="button" onClick={() => setMappingOpen(false)}>
                 Cancel
               </button>

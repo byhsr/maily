@@ -6,6 +6,7 @@ import { FormatToolbar } from "./FormatToolbar";
 import { Select } from "./Select";
 import { SpamChip } from "./SpamScore";
 import { Tooltip } from "./Tooltip";
+import { useVariableSuggest, VariableInput, VariableMenu } from "./VariableTextarea";
 
 /** One follow-up, as the composer and a campaign's setup both hold it. */
 export type FollowupStep = {
@@ -27,6 +28,9 @@ type FollowupCardProps = {
   /** What the variables would be filled from, so a written variable is not scored as if it
    *  were going to send blank — and so the preview shows the copy as one lead will read it. */
   values?: Record<string, string | undefined>;
+  /** The variables this step may interpolate, offered as `{{` is typed. Empty hides the
+   *  picker, which is what the composer wants: its audience is one person, not a list. */
+  variables?: string[];
   /** When the step falls due, e.g. "in 3 days" — omitted where there is no anchor. */
   dueLabel?: string;
   /** How many people have already been sent this step. A campaign that is running shows it,
@@ -55,6 +59,7 @@ export function FollowupCard({
   label,
   subject,
   values,
+  variables,
   dueLabel,
   sent,
   onChange,
@@ -71,6 +76,8 @@ export function FollowupCard({
   const body = useRef<HTMLTextAreaElement>(null);
   const [showPreview, setShowPreview] = useState(false);
   const preview = previewEmailMarkdown(step.body_md, values ?? {});
+  // `{{` opens the picker while typing, from the campaign's own audience.
+  const suggest = useVariableSuggest(variables ?? [], (next) => onChange({ body_md: next }));
 
   /** The same wait, expressed as the day it would land on, so switching modes keeps intent. */
   const asDate = () => {
@@ -146,25 +153,33 @@ export function FollowupCard({
         )}
       </div>
 
-      <input
+      <VariableInput
         className="fufsubject"
         type="text"
+        variables={variables ?? []}
         value={step.subject_override ?? ""}
         disabled={disabled}
         aria-label={`${label} subject`}
         placeholder="Subject — blank continues the first email's"
-        onChange={(event) => onChange({ subject_override: event.target.value })}
+        onChange={(next) => onChange({ subject_override: next })}
       />
 
-      <textarea
-        ref={body}
-        className="fuftext"
-        value={step.body_md}
-        disabled={disabled}
-        aria-label={`${label} message`}
-        placeholder="Write the follow-up in markdown..."
-        onChange={(event) => onChange({ body_md: event.target.value })}
-      />
+      <div className="varfield">
+        <textarea
+          ref={body}
+          className="fuftext"
+          value={step.body_md}
+          disabled={disabled}
+          aria-label={`${label} message`}
+          placeholder="Write the follow-up in markdown... — type {{ for the variables"
+          onChange={(event) => {
+            onChange({ body_md: event.target.value });
+            suggest.sync(event.target);
+          }}
+          onKeyDown={(event) => suggest.onKeyDown(event.currentTarget, event)}
+        />
+        <VariableMenu suggest={suggest} onPick={(key) => suggest.choose(body.current, key)} />
+      </div>
 
       <div className="fufformat">
         <FormatToolbar

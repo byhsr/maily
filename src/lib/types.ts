@@ -34,6 +34,8 @@ export type CampaignLeadRow = {
   outcome?: string | null;
   /** Index of the step this lead is waiting on; 0 is the first email. */
   step_position?: number;
+  /** Which first-touch subject line this lead was given, when the campaign is split. */
+  subject_variant?: number | null;
   /** When the next step falls due; null means it may send on the next tick. */
   next_due_at?: string | null;
   email: string;
@@ -92,12 +94,25 @@ export type CampaignStep = {
   send_date?: string | null;
 };
 
+/** How one first-touch subject line is doing when a campaign's audience is split. */
+export type SubjectStat = {
+  position: number;
+  subject: string;
+  leads: number;
+  sent: number;
+  replied: number;
+};
+
 /** The campaign page's payload: settings, sequence, per-state counts, and every enrolment. */
 export type CampaignDetail = {
   campaign: Campaign;
   counts: Record<string, number>;
   leads: CampaignLeadRow[];
   steps: CampaignStep[];
+  /** The first-touch subject lines, in order. More than one means the audience is split. */
+  subjects?: string[];
+  /** Per-line tallies, present only when the campaign is split. */
+  subject_stats?: SubjectStat[];
   sent: number;
   /** Which stop rules this campaign obeys; every one is on unless turned off. */
   stop_rules?: StopRules;
@@ -138,8 +153,10 @@ export type Lead = {
   id: string;
   email: string;
   first_name?: string;
+  last_name?: string;
   company?: string;
   title?: string;
+  website?: string;
   list_name?: string;
   status: string;
   /** How the lead arrived: `import` for one row of a CSV/XLSX, `manual` for one typed in,

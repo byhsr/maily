@@ -1,5 +1,10 @@
-import type { InputHTMLAttributes } from "react";
+import type { InputHTMLAttributes, Ref } from "react";
 
-export function Input(props: InputHTMLAttributes<HTMLInputElement>) {
-  return <input {...props} />;
+/** `ref` is passed straight through (React 19 forwards it as a plain prop), so a field the
+ *  variable picker anchors to can hold the element it needs. */
+export function Input({
+  ref,
+  ...props
+}: InputHTMLAttributes<HTMLInputElement> & { ref?: Ref<HTMLInputElement> }) {
+  return <input ref={ref} {...props} />;
 }

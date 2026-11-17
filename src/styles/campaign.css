@@ -13,6 +13,28 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* The campaign page owns its top edge: no gap between the window strip and the campaign
+   header, which is why the column's own top padding is dropped here. */
+.app-main:has(.campaignpage) {
+  padding-top: 0;
+}
+
+/* The campaign header holds while the page scrolls, so the tabs, the status and Launch are
+   always within reach. It is pulled out to the column's edges so its background spans the
+   width and nothing shows through behind it. */
+.campaignpage .pagehead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: 0 calc(-1 * var(--s6)) var(--s5);
+  padding-top: var(--s3);
+  padding-left: var(--s6);
+  padding-right: var(--s6);
+  background: var(--bg-app);
+  /* The band covers the header's own bottom margin, so nothing scrolls through the gap. */
+  box-shadow: 0 var(--s5) 0 var(--bg-app);
+}
+
 .pagehead-tabs {
   flex-basis: 100%;
   display: flex;
@@ -132,7 +154,8 @@
 
 .setupside {
   position: sticky;
-  top: 24px;
+  /* Sits below the sticky page header (and the band under it) rather than under them. */
+  top: 120px;
 }
 
 @media (max-width: 1080px) {
@@ -211,8 +234,8 @@
 }
 
 .srow .seqbody {
-  min-height: 120px;
-  max-width: 560px;
+  min-height: 240px;
+  max-width: 100%;
 }
 
 .link {
@@ -424,6 +447,37 @@
 .tnote {
   color: var(--text-muted);
   font-size: var(--fs-xs);
+}
+
+/* The first-touch subject lines. One is an ordinary subject; more than one is an A/B test. */
+.subjectlines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.subjectline {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.subjectline .varfield {
+  flex: 1;
+  min-width: 0;
+}
+
+.subjectline input {
+  width: 100%;
+}
+
+.subjecttag {
+  flex: none;
+  width: 18px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-weight: 600;
 }
 
 /* When the campaign may begin, with the one control that changes it. */
@@ -678,4 +732,68 @@
 
 .dot-bad {
   background: var(--danger);
+}
+
+/* ---------- The campaigns list view ---------- */
+
+.camplist {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.camphead,
+.camprowline {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 110px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s4);
+}
+
+.camphead {
+  height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.camprowline {
+  height: 48px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.camprowline:last-child {
+  border-bottom: 0;
+}
+
+.camprowline:hover {
+  background: var(--bg-hover);
+}
+
+.camplink {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-13);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.camprowactions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
 }
