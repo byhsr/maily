@@ -270,14 +270,19 @@ struct LeadInput {
     /// lead is first created — a re-import never relabels one that is already there.
     source: Option<String>,
 }
-/// The editable fields of an existing lead, changed in place by id.
+/// The editable fields of an existing lead, changed in place by id. Beside the identity
+/// columns it carries `custom_fields`, so the columns an import kept can be corrected by
+/// hand and a message then interpolates the corrected value.
 #[derive(Deserialize)]
 struct LeadUpdate {
     id: String,
     email: String,
     first_name: Option<String>,
+    last_name: Option<String>,
     company: Option<String>,
     title: Option<String>,
+    website: Option<String>,
+    custom_fields: Option<Value>,
 }
 #[derive(Deserialize)]
 struct CampaignInput {
@@ -288,6 +293,10 @@ struct CampaignInput {
     /// sequence, and the reason sending never reads a template.
     subject: Option<String>,
     body: Option<String>,
+    /// Every first-touch subject line this campaign may go out with, in order. Position 0
+    /// is the one on the campaign itself; the rest are challengers an A/B test splits
+    /// across the audience. Empty means the single `subject` line is all there is.
+    subjects: Option<Vec<String>>,
     list_name: Option<String>,
     interval_minutes: Option<i64>,
     account_id: Option<String>,
@@ -717,13 +726,19 @@ async fn update_lead(state: State<'_, AppState>, input: LeadUpdate) -> Result<()
     if clash > 0 {
         return Err("Another lead already uses that email".into());
     }
+    // A missing `custom_fields` leaves the stored row alone; the editor always sends the
+    // object it was given, so a field the form dropped is not silently erased.
+    let custom = input.custom_fields.map(|value| value.to_string());
     let updated = sqlx::query(
-        "UPDATE leads SET email=?,first_name=?,company=?,title=?,updated_at=? WHERE id=?",
+        "UPDATE leads SET email=?,first_name=?,last_name=?,company=?,title=?,website=?,custom_fields=COALESCE(?,custom_fields),updated_at=? WHERE id=?",
     )
     .bind(&email)
     .bind(input.first_name)
+    .bind(input.last_name)
     .bind(input.company)
     .bind(input.title)
+    .bind(input.website)
+    .bind(custom)
     .bind(now())
     .bind(&input.id)
     .execute(&state.db)
@@ -970,6 +985,45 @@ async fn list_templates(state: State<'_, AppState>) -> Result<Vec<Value>> {
         .collect())
 }
 
+/// Replaces a campaign's first-touch subject lines. Position 0 is the original and the rest
+/// are challengers; the list is only rewritten when it actually changed, so the autosave that
+/// fires every few seconds does not churn rows.
+async fn write_campaign_subjects(
+    db: &SqlitePool,
+    campaign_id: &str,
+    lines: &[String],
+) -> Result<()> {
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM campaign_subjects WHERE campaign_id=? ORDER BY position",
+    )
+    .bind(campaign_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    if existing == lines {
+        return Ok(());
+    }
+    let mut tx = db.begin().await.map_err(err)?;
+    sqlx::query("DELETE FROM campaign_subjects WHERE campaign_id=?")
+        .bind(campaign_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    let t = now();
+    for (position, subject) in lines.iter().enumerate() {
+        sqlx::query("INSERT INTO campaign_subjects(id,campaign_id,position,subject,created_at) VALUES(?,?,?,?,?)")
+            .bind(id())
+            .bind(campaign_id)
+            .bind(position as i64)
+            .bind(subject)
+            .bind(&t)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    tx.commit().await.map_err(err)
+}
+
 #[tauri::command]
 async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Result<String> {
     let name = input.name.trim().to_string();
@@ -992,6 +1046,25 @@ async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Resu
         .body
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    // The subject lines this campaign may open with. The list the form sent is the truth;
+    // when it is absent or empty, the single `subject` line stands as the only one.
+    let mut lines: Vec<String> = subject.clone().into_iter().collect();
+    if let Some(sent) = input.subjects {
+        let mut seen = std::collections::HashSet::new();
+        let mut cleaned: Vec<String> = Vec::new();
+        for line in sent {
+            let line = line.trim().to_string();
+            if !line.is_empty() && seen.insert(line.to_lowercase()) {
+                cleaned.push(line);
+            }
+        }
+        if !cleaned.is_empty() {
+            lines = cleaned;
+        }
+    }
+    // The campaign's own subject is the first line, so the single-subject fallback, a
+    // follow-up's `Re:` and the list view all agree with the A/B list.
+    let subject = lines.first().cloned();
     let existing = input.id.filter(|value| !value.trim().is_empty());
     // Stored only when the form sent rules, so a partial save cannot wipe them.
     let rules = input
@@ -1012,7 +1085,7 @@ async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Resu
     // A cap of zero or less means "no cap of this campaign's own".
     let cap = input.daily_cap.filter(|cap| *cap > 0);
     let t = now();
-    match existing {
+    let campaign_id = match existing {
         Some(existing) => {
             let updated = sqlx::query("UPDATE campaigns SET name=?,template_id=?,subject=?,body=?,list_name=?,interval_minutes=?,account_id=?,stop_rules=COALESCE(?,stop_rules),timezone=?,scheduled_at=?,daily_cap=?,updated_at=? WHERE id=?")
                 .bind(&name)
@@ -1035,7 +1108,7 @@ async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Resu
             if updated == 0 {
                 return Err("That campaign no longer exists".into());
             }
-            Ok(existing)
+            existing
         }
         None => {
             let fresh = id();
@@ -1059,9 +1132,12 @@ async fn save_campaign(state: State<'_, AppState>, input: CampaignInput) -> Resu
                 .execute(&state.db)
                 .await
                 .map_err(err)?;
-            Ok(fresh)
+            fresh
         }
-    }
+    };
+    // The A/B list travels beside the campaign, so an edit to it is saved with the copy.
+    write_campaign_subjects(&state.db, &campaign_id, &lines).await?;
+    Ok(campaign_id)
 }
 /// Replaces a campaign's follow-up sequence. Position is the array order, and the first
 /// touch — step 0 — lives on the campaign itself, so it is never stored here. Each step
@@ -1150,6 +1226,16 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
         .map_err(err)?
         .ok_or("Campaign not found")?;
 
+    // The first-touch subject lines, in order. Position 0 is the original; anything after it
+    // is a challenger the audience is split across.
+    let subjects: Vec<String> = sqlx::query_scalar(
+        "SELECT subject FROM campaign_subjects WHERE campaign_id=? ORDER BY position",
+    )
+    .bind(&campaign_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(err)?;
+
     let counted = sqlx::query(
         "SELECT state,count(*) AS n FROM campaign_leads WHERE campaign_id=? GROUP BY state",
     )
@@ -1164,7 +1250,7 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
 
     // Enough per enrolment to draw a row, say which step it is on, and open its
     // conversation. `suppressed` is what makes an unsubscribed lead read as unsubscribed.
-    let rows = sqlx::query("SELECT cl.lead_id,cl.state,cl.outcome,cl.step_position,cl.next_due_at,cl.thread_ref,l.email,l.first_name,l.company,(SELECT max(s.created_at) FROM send_logs s WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id) AS sent_at,(SELECT count(*) FROM send_logs s WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id) AS sent_steps,(SELECT m.id FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.deleted_at IS NULL ORDER BY m.received_at DESC LIMIT 1) AS last_message_id,EXISTS(SELECT 1 FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.ours=0 AND m.deleted_at IS NULL) AS replied,EXISTS(SELECT 1 FROM suppressions WHERE suppressions.email=l.email) AS suppressed FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? ORDER BY l.rowid")
+    let rows = sqlx::query("SELECT cl.lead_id,cl.state,cl.outcome,cl.step_position,cl.subject_variant,cl.next_due_at,cl.thread_ref,l.email,l.first_name,l.company,(SELECT max(s.created_at) FROM send_logs s WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id) AS sent_at,(SELECT count(*) FROM send_logs s WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id) AS sent_steps,(SELECT m.id FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.deleted_at IS NULL ORDER BY m.received_at DESC LIMIT 1) AS last_message_id,EXISTS(SELECT 1 FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.ours=0 AND m.deleted_at IS NULL) AS replied,EXISTS(SELECT 1 FROM suppressions WHERE suppressions.email=l.email) AS suppressed FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? ORDER BY l.rowid")
         .bind(&campaign_id)
         .fetch_all(&state.db)
         .await
@@ -1177,6 +1263,7 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
                 "state": r.get::<String, _>("state"),
                 "outcome": r.get::<Option<String>, _>("outcome"),
                 "step_position": r.get::<i64, _>("step_position"),
+                "subject_variant": r.get::<Option<i64>, _>("subject_variant"),
                 "next_due_at": r.get::<Option<String>, _>("next_due_at"),
                 "email": r.get::<String, _>("email"),
                 "first_name": r.get::<Option<String>, _>("first_name"),
@@ -1318,6 +1405,35 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
         }));
     }
 
+    // How each subject line is doing, so an A/B test can be read rather than guessed. Only
+    // built when there is more than one line; one line is not a test.
+    let variant_of: std::collections::HashMap<String, i64> = rows
+        .iter()
+        .filter_map(|r| {
+            r.get::<Option<i64>, _>("subject_variant")
+                .map(|variant| (r.get::<String, _>("lead_id"), variant))
+        })
+        .collect();
+    let mut subject_stats: Vec<Value> = Vec::new();
+    if subjects.len() > 1 {
+        for (position, line) in subjects.iter().enumerate() {
+            let position = position as i64;
+            subject_stats.push(json!({
+                "position": position,
+                "subject": line,
+                "leads": variant_of.values().filter(|variant| **variant == position).count(),
+                "sent": sends
+                    .iter()
+                    .filter(|(lead, step, _)| *step == 0 && variant_of.get(lead) == Some(&position))
+                    .count(),
+                "replied": replied_leads
+                    .iter()
+                    .filter(|lead| variant_of.get(*lead) == Some(&position))
+                    .count(),
+            }));
+        }
+    }
+
     let names: std::collections::HashMap<String, String> = rows
         .iter()
         .map(|r| {
@@ -1376,6 +1492,8 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
         "counts": Value::Object(counts),
         "leads": leads,
         "steps": steps,
+        "subjects": subjects,
+        "subject_stats": subject_stats,
         "sent": sent,
         "stop_rules": rules,
         "stats": {
@@ -1427,6 +1545,14 @@ async fn duplicate_campaign(state: State<'_, AppState>, campaign_id: String) -> 
     // Each step carries its own message, so the copy needs no template lookup.
     sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,template_id,body_md,subject_override,enabled,send_date) SELECT lower(hex(randomblob(16))),?,position,delay_minutes,template_id,body_md,subject_override,enabled,send_date FROM sequence_steps WHERE campaign_id=?")
         .bind(&fresh)
+        .bind(&campaign_id)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+    // A duplicated campaign keeps its A/B subject lines, so a test can be picked up from it.
+    sqlx::query("INSERT INTO campaign_subjects(id,campaign_id,position,subject,created_at) SELECT lower(hex(randomblob(16))),?,position,subject,? FROM campaign_subjects WHERE campaign_id=?")
+        .bind(&fresh)
+        .bind(&t)
         .bind(&campaign_id)
         .execute(&state.db)
         .await
@@ -2818,14 +2944,21 @@ async fn list_lead_lists(state: State<'_, AppState>) -> Result<Vec<Value>> {
 /// goes back to `active`, and `INSERT OR IGNORE` leaves already-sent leads alone.
 #[tauri::command]
 async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<usize> {
-    let c = sqlx::query("SELECT status,template_id,list_name,workspace_id FROM campaigns WHERE id=?")
+    let c = sqlx::query("SELECT status,subject,body,list_name,workspace_id FROM campaigns WHERE id=?")
         .bind(&campaign_id)
         .fetch_optional(&state.db)
         .await
         .map_err(err)?
         .ok_or("Campaign not found")?;
-    if c.get::<Option<String>, _>("template_id").is_none() {
-        return Err("Choose a template before launching".into());
+    // The first email lives on the campaign itself now, so a template is no longer needed
+    // to launch — the message is. What is sent is this copy, never a template.
+    let written = |column: &str| {
+        c.get::<Option<String>, _>(column)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    };
+    if !written("subject") || !written("body") {
+        return Err("Give the first email a subject and a message before launching".into());
     }
     if c.get::<String, _>("status") == "active" {
         return Err("Campaign is already running".into());
@@ -2860,6 +2993,23 @@ async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Res
         .map_err(err)?
         .rows_affected()
     };
+    // Split the audience across the subject lines, so an A/B test is decided up front rather
+    // than by send order: a lead's variant is its position among the campaign's enrolments,
+    // modulo the number of lines. Enrolment happened in the order the scheduler sends (by
+    // lead rowid), so the split is an even A/B/A/B, and a lead keeps the line it was given.
+    let variants: i64 = sqlx::query_scalar("SELECT count(*) FROM campaign_subjects WHERE campaign_id=?")
+        .bind(&campaign_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(err)?;
+    if variants > 1 {
+        sqlx::query("UPDATE campaign_leads SET subject_variant=(SELECT count(*) FROM campaign_leads c WHERE c.campaign_id=campaign_leads.campaign_id AND c.rowid<campaign_leads.rowid) % ? WHERE campaign_id=? AND subject_variant IS NULL")
+            .bind(variants)
+            .bind(&campaign_id)
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+    }
     // Launching is itself the approval; stamping approved_at is what the send path checks.
     sqlx::query("UPDATE campaigns SET status='active',approved_at=COALESCE(approved_at,?),updated_at=? WHERE id=?")
         .bind(now())
@@ -3795,10 +3945,36 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .ok_or("This campaign has no first message yet")?;
-            let subject = source
+            // The campaign's own subject is the fallback; when the audience was split, this
+            // lead's line is the one its variant points at. Selection happens before the
+            // variables are resolved, so each line interpolates like any other.
+            let fallback = source
                 .get::<Option<String>, _>("subject")
                 .map(|value| value.trim().to_string())
                 .unwrap_or_default();
+            let subject = match sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT subject_variant FROM campaign_leads WHERE campaign_id=? AND lead_id=?",
+            )
+            .bind(campaign)
+            .bind(lead_id)
+            .fetch_optional(&st.db)
+            .await
+            .map_err(err)?
+            .flatten()
+            {
+                Some(index) => sqlx::query_scalar::<_, String>(
+                    "SELECT subject FROM campaign_subjects WHERE campaign_id=? AND position=?",
+                )
+                .bind(campaign)
+                .bind(index)
+                .fetch_optional(&st.db)
+                .await
+                .map_err(err)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(fallback),
+                None => fallback,
+            };
             (subject, None, body, None, None)
         } else {
             // A campaign follow-up carries its own copy too, so this is a plain read. It
