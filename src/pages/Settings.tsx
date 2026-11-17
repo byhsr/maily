@@ -1,4 +1,6 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { ChevronDown, ChevronRight, Copy, Eye, EyeOff } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -24,6 +26,7 @@ import {
 } from "../lib/api";
 import { whenLabel } from "../lib/agents";
 import type { Account, LlmModel, LlmSettings, OllamaModel } from "../lib/types";
+import { checkForUpdate, installUpdate, type UpdateState } from "../lib/updates";
 import { Button } from "../ui/Button";
 import { Confirm } from "../ui/Confirm";
 import { Input } from "../ui/Input";
@@ -31,13 +34,14 @@ import { ModelPicker } from "../ui/ModelPicker";
 import { PageHeader } from "../ui/PageHeader";
 import { Select, type SelectOption } from "../ui/Select";
 
-type Section = "workspace" | "accounts" | "models" | "limits" | "danger";
+type Section = "workspace" | "accounts" | "models" | "limits" | "updates" | "danger";
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "workspace", label: "General" },
   { key: "accounts", label: "Email accounts" },
   { key: "models", label: "AI models" },
   { key: "limits", label: "Sending limits" },
+  { key: "updates", label: "Updates" },
   { key: "danger", label: "Danger zone" },
 ];
 
@@ -132,6 +136,12 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
   const [connectError, setConnectError] = useState("");
   const completed = useRef(false);
 
+  /** The version this build reports, and the state of the update check behind the Updates tab. */
+  const [version, setVersion] = useState("");
+  const [update, setUpdate] = useState<UpdateState>({ kind: "idle" });
+  const [updating, setUpdating] = useState(false);
+  const [percent, setPercent] = useState<number | null>(null);
+
   useEffect(() => setName(workspace), [workspace]);
 
   const loadOauth = () =>
@@ -213,6 +223,10 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
       .catch(() => {});
     loadAccounts();
     loadOauth();
+    // Asked of the running build, so the Updates tab cannot claim a version it is not.
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
   }, []);
 
   /* ---------- Workspace ---------- */
@@ -532,6 +546,32 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
       tell(String(e));
     } finally {
       setBusy("");
+    }
+  };
+
+  /* ---------- Updates ---------- */
+
+  /** Asks the release endpoint now, rather than waiting for the next app open. */
+  const checkUpdates = async () => {
+    setUpdate({ kind: "checking" });
+    const found = await checkForUpdate();
+    setUpdate(found);
+    if (found.kind === "current") tell("Maily is up to date");
+    if (found.kind === "available") tell(`Maily ${found.version} is available`);
+    if (found.kind === "error") tell(`Could not check for updates: ${found.message}`);
+  };
+
+  const runUpdate = async () => {
+    setUpdating(true);
+    try {
+      // The new build cannot take over while this one holds the process.
+      if (await installUpdate(setPercent)) await relaunch();
+    } catch (e) {
+      setUpdate({ kind: "error", message: String(e) });
+      tell(String(e));
+    } finally {
+      setUpdating(false);
+      setPercent(null);
     }
   };
 
@@ -968,6 +1008,49 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
                 </div>
               </div>
             )}
+          </section>
+        )}
+
+        {tab === "updates" && (
+          <section className="settingssection">
+            <header>
+              <h2>Updates</h2>
+              <p>
+                Maily asks for a new release when it opens, and says so if there is one. A release is
+                signed, and the download is checked against the key built into this app before it is
+                installed — so a manifest that has been tampered with installs nothing.
+              </p>
+            </header>
+            <div className="settingrow">
+              <div>
+                <b>Maily {version || "—"}</b>
+                <small>
+                  {update.kind === "checking"
+                    ? "Checking…"
+                    : update.kind === "current"
+                      ? "You are on the latest release."
+                      : update.kind === "available"
+                        ? `Maily ${update.version} is available.`
+                        : update.kind === "error"
+                          ? `Could not check: ${update.message}`
+                          : "Not checked since this app opened."}
+                </small>
+              </div>
+              <div className="settingrow-control">
+                <Button
+                  variant="secondary"
+                  onClick={checkUpdates}
+                  disabled={update.kind === "checking" || updating}
+                >
+                  {update.kind === "checking" ? "Checking…" : "Check for updates"}
+                </Button>
+                {update.kind === "available" && (
+                  <Button onClick={runUpdate} disabled={updating}>
+                    {updating ? (percent === null ? "Downloading…" : `${percent}%`) : "Install and restart"}
+                  </Button>
+                )}
+              </div>
+            </div>
           </section>
         )}
 
