@@ -1,0 +1,6 @@
+# Migration files are hashed byte-for-byte by sqlx and embedded in the binary at compile
+# time. If git rewrites their line endings, every checksum changes and the app refuses to
+# start against any database that was migrated before the rewrite: "migration N was
+# previously applied but has been modified". Pin them to LF everywhere so the bytes sqlx
+# hashes are the bytes that stay in the repo.
+*.sql text eol=lf
