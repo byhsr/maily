@@ -1,0 +1,50 @@
+name: Release
+
+# A tag is the only thing that publishes, and the checkout is the only thing that gets
+# built. That is the point: the 0.1.0 installer was assembled by hand from a working tree
+# whose migration files had different line endings than the repository's, and the result
+# could not open an existing database. sqlx hashes those files byte-for-byte, so the
+# build has to come from the same bytes the repo holds.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # Git checks the tag out; tauri-action builds the NSIS installer, signs the updater
+      # artifacts with the key from the repository secrets and writes latest.json next to
+      # them. Draft, so a release is looked at before it is published.
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Maily ${{ github.ref_name }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis
