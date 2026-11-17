@@ -17,6 +17,10 @@ tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# For the migration checksums sqlx verifies: a database migrated by a build whose
+# checkout had different line endings is recognised as the same migration, not a
+# modified one. Same version sqlx itself hashes with.
+sha2 = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }

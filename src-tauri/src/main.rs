@@ -1,3 +1,8 @@
+// The release build is a windowed app. Without this the linker leaves it on the console
+// subsystem and Windows opens a command prompt behind the window on every launch — a
+// console that also closes the instant the app exits, taking any startup message with it.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
@@ -6877,6 +6882,120 @@ fn constrain_maximize(window: &tauri::WebviewWindow) {
     }
 }
 
+/// Runs the migrations, tolerating the one failure that is not the database's fault.
+///
+/// sqlx hashes every migration file byte-for-byte at compile time, so a build whose
+/// checkout had different line endings computes different hashes and then refuses to
+/// start against a database an earlier build migrated: "migration N was previously
+/// applied but has been modified". The SQL is identical either way, so a mismatch is
+/// re-checked with the other line ending before it is treated as a real one.
+async fn migrate(db: &SqlitePool) -> std::result::Result<(), String> {
+    let migrator = sqlx::migrate!("./migrations");
+    // One repair per mismatching version. The bound only stops a repair that somehow
+    // does not take from looping forever.
+    for _ in 0..32 {
+        let error = match migrator.run(db).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        match &error {
+            sqlx::migrate::MigrateError::VersionMismatch(version) => {
+                if !accept_other_line_endings(db, &migrator, *version).await? {
+                    return Err(error.to_string());
+                }
+            }
+            _ => return Err(error.to_string()),
+        }
+    }
+    Err("The database would not accept its migrations".into())
+}
+
+/// Rewrites one recorded migration checksum when the only difference is the line ending,
+/// and reports whether it did. A recorded checksum that matches neither ending is left
+/// alone, so a migration someone genuinely edited still stops the app.
+async fn accept_other_line_endings(
+    db: &SqlitePool,
+    migrator: &sqlx::migrate::Migrator,
+    version: i64,
+) -> std::result::Result<bool, String> {
+    use sha2::{Digest, Sha384};
+
+    let Some(migration) = migrator.iter().find(|m| m.version == version) else {
+        return Ok(false);
+    };
+    let stored: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version=?")
+            .bind(version)
+            .fetch_optional(db)
+            .await
+            .map_err(err)?;
+    let Some(stored) = stored else { return Ok(false) };
+    let embedded = migration.checksum.to_vec();
+    if stored == embedded {
+        return Ok(false);
+    }
+    let bare = migration.sql.replace("\r\n", "\n");
+    let hash = |value: &str| Sha384::digest(value.as_bytes()).to_vec();
+    // Whichever of the two endings the database recorded is what it ran; the build's own
+    // hash is the other one. Anything else is a different migration.
+    let other = if hash(&bare) == embedded {
+        hash(&bare.replace('\n', "\r\n"))
+    } else {
+        hash(&bare)
+    };
+    if stored != other {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=? WHERE version=?")
+        .bind(&embedded)
+        .bind(version)
+        .execute(db)
+        .await
+        .map_err(err)?;
+    log(
+        db,
+        "info",
+        "migration_line_endings",
+        &format!("accepted migration {version} whose line endings changed"),
+    )
+    .await;
+    Ok(true)
+}
+
+/// Says why the app is not starting and ends it. A windowed build has no console, so a
+/// dialog is the only thing a user can be shown; nothing is left to run afterwards, which
+/// is why this does not return.
+fn fatal(message: &str) -> ! {
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(
+                hwnd: *mut c_void,
+                text: *const u16,
+                caption: *const u16,
+                kind: u32,
+            ) -> i32;
+        }
+
+        const MB_ICONERROR: u32 = 0x0000_0010;
+        let wide = |value: &str| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        };
+        let body = wide(message);
+        let caption = wide("Maily");
+        unsafe { MessageBoxW(std::ptr::null_mut(), body.as_ptr(), caption.as_ptr(), MB_ICONERROR) };
+    }
+    #[cfg(not(windows))]
+    eprintln!("Maily: {message}");
+    std::process::exit(1);
+}
+
 fn main() {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let dir = tauri::path::BaseDirectory::AppData;
@@ -6906,29 +7025,43 @@ fn main() {
                 constrain_maximize(&window);
                 fit_to_work_area(&window);
             }
-            let path = app
-                .path()
-                .resolve("maily.sqlite", dir)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            let state = tauri::async_runtime::block_on(async {
+            // A failure here is the whole reason the app can look like it simply refuses to
+            // open: Tauri panics inside its own `run` when a setup hook returns an error,
+            // and a windowed build has no console for that panic to reach. So the database
+            // is opened and migrated here, and whatever went wrong is put in a dialog.
+            let path = match app.path().resolve("maily.sqlite", dir) {
+                Ok(path) => path,
+                Err(e) => fatal(&format!("Maily could not find its data folder: {e}")),
+            };
+            if let Err(e) = std::fs::create_dir_all(path.parent().unwrap()) {
+                fatal(&format!(
+                    "Maily could not create {}: {e}",
+                    path.parent().unwrap().display()
+                ));
+            }
+            let opened = tauri::async_runtime::block_on(async {
                 let db = SqlitePoolOptions::new()
                     .max_connections(6)
                     .connect(&format!("sqlite:{}?mode=rwc", path.display()))
                     .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                sqlx::migrate!("./migrations")
-                    .run(&db)
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                Ok::<_, std::io::Error>(AppState {
+                    .map_err(|e| e.to_string())?;
+                migrate(&db).await?;
+                Ok::<_, String>(AppState {
                     db,
                     http: Client::new(),
                     agents: Arc::new(Semaphore::new(2)),
                     sync: Arc::new(Semaphore::new(1)),
                     app: app.handle().clone(),
                 })
-            })?;
+            });
+            let state = match opened {
+                Ok(state) => state,
+                Err(message) => fatal(&format!(
+                    "Maily could not open its database.\n\n{}\n\nThe file is {}.",
+                    message,
+                    path.display()
+                )),
+            };
             tauri::async_runtime::spawn(scheduler(state.clone()));
             tauri::async_runtime::spawn(inbox_poller(state.clone()));
             app.manage(state);
