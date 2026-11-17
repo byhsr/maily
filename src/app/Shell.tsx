@@ -282,7 +282,8 @@ export function Shell() {
     setDrawer("lead");
   };
 
-  const openCampaignEditor = (id: string) => go({ page: "Campaign", campaignId: id });
+  // Opening a campaign lands on its setup, never on the analytics view left open before.
+  const openCampaignEditor = (id: string) => go({ page: "Campaign", campaignId: id, tab: undefined });
 
   const startNewCampaign = () => setNaming(true);
 
@@ -363,6 +364,9 @@ export function Shell() {
               favourites={favourites}
               onToggleFavourite={toggleFavourite}
               onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
+              onOpenAnalytics={(campaign) =>
+                go({ page: "Campaign", campaignId: campaign.id, tab: "activity" })
+              }
               onDelete={removeCampaign}
               tell={tell}
             />
@@ -440,7 +444,7 @@ export function Shell() {
               onTab={(tab) => go({ page: "Campaign", tab })}
               onBackToCampaigns={() => go({ page: "Campaigns" })}
               onDeleted={() => go({ page: "Campaigns" })}
-              onDuplicated={(id) => go({ page: "Campaign", campaignId: id })}
+              onDuplicated={(id) => go({ page: "Campaign", campaignId: id, tab: undefined })}
               onOpenThread={(messageId) => go({ page: "Inbox", messageId })}
             />
           )}

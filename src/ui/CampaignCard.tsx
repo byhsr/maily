@@ -1,4 +1,4 @@
-import { Mail, Mailbox, MoreVertical, Send, Star } from "lucide-react";
+import { BarChart3, Mail, Mailbox, MoreVertical, Send, Star } from "lucide-react";
 import { useState } from "react";
 import type { Campaign } from "../lib/types";
 
@@ -34,10 +34,12 @@ type CampaignCardProps = {
   favourite: boolean;
   onToggleFavourite: () => void;
   onOpen: () => void;
+  /** Opens the campaign straight on its Activity tab. */
+  onAnalytics: () => void;
   onDelete: () => void;
 };
 
-export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onDelete }: CampaignCardProps) {
+export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, onAnalytics, onDelete }: CampaignCardProps) {
   const [menu, setMenu] = useState(false);
   const active = campaign.status === "active";
   const when = relTime(campaign.approved_at);
@@ -53,6 +55,16 @@ export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, o
           <span>{campaign.list_name?.trim() || "All leads"}</span>
         </span>
         <div className="cardactions">
+          <button
+            className="cardaction"
+            type="button"
+            onClick={onAnalytics}
+            aria-label={`Analytics for ${campaign.name}`}
+            title="Analytics"
+          >
+            <BarChart3 />
+            Analytics
+          </button>
           <button
             className="pin"
             onClick={onToggleFavourite}
@@ -81,6 +93,14 @@ export function CampaignCard({ campaign, favourite, onToggleFavourite, onOpen, o
                     }}
                   >
                     Open campaign
+                  </button>
+                  <button
+                    onClick={() => {
+                      setMenu(false);
+                      onAnalytics();
+                    }}
+                  >
+                    Analytics
                   </button>
                   <button
                     className="danger"
