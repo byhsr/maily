@@ -3528,6 +3528,14 @@ hr {
   cursor: grab;
 }
 
+/* What a running campaign has already put in front of people, so an edit can be read
+   against it. */
+.fufsent {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
 .fufdelay {
   display: flex;
   align-items: center;
@@ -3593,6 +3601,28 @@ hr {
 
 .fufsubject:focus {
   border-color: var(--text-faint);
+}
+
+/* The markdown tools under a step's message, with the preview toggle pushed to the far
+   end so the tools stay put whether the preview is open or not. */
+.fufformat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+/* A step read back the way it will arrive: the same markup the composer previews, on the
+   card's own surface rather than the composer's. */
+.fufpreview {
+  max-height: 260px;
+  overflow: auto;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: var(--fs-13);
 }
 
 /* A release waiting to be installed. The only chrome the updater ever shows. */

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { previewEmailMarkdown, renderEmailMarkdown, renderMessageBody, sanitizeEmailHtml } from "./email";
+import { previewEmailMarkdown, renderEmailMarkdown, renderEmailTemplate, renderMessageBody, sanitizeEmailHtml } from "./email";
 
 describe("email markdown rendering", () => {
   it("leaves raw HTML as literal text instead of rendering it", () => {
@@ -57,6 +57,17 @@ describe("email markdown rendering", () => {
     const { html } = renderEmailMarkdown("Hi {{first_name|there}}", { first_name: "Ada" });
     expect(html).toContain("Ada");
     expect(renderEmailMarkdown("Hi {{first_name|there}}", {}).html).toContain("there");
+  });
+
+  it("keeps the variables standing for copy that goes to a whole audience", () => {
+    // A campaign step is rendered once and sent to every lead, so the lead is only known at
+    // delivery: resolving here would bake one person's values into everybody's copy.
+    const { html, text } = renderEmailTemplate("Hi {{first_name|there}},\n\n- one\n- two");
+    expect(html).toContain("{{first_name|there}}");
+    expect(text).toContain("{{first_name|there}}");
+    // Still the delivered rendering: markup is markup, and the email's styles are on it.
+    expect(html).toContain("<ul");
+    expect(html).toContain("style=");
   });
 
   it("shares one pipeline between the preview and the delivered html", () => {

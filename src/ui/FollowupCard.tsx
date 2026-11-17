@@ -1,7 +1,11 @@
-import { GripVertical, Trash2 } from "lucide-react";
+import { useRef, useState } from "react";
+import { Eye, EyeOff, GripVertical, Trash2 } from "lucide-react";
+import { previewEmailMarkdown } from "../lib/email";
 import { scoreMessage } from "../lib/spam";
-import { SpamChip } from "./SpamScore";
+import { FormatToolbar } from "./FormatToolbar";
 import { Select } from "./Select";
+import { SpamChip } from "./SpamScore";
+import { Tooltip } from "./Tooltip";
 
 /** One follow-up, as the composer and a campaign's setup both hold it. */
 export type FollowupStep = {
@@ -21,10 +25,13 @@ type FollowupCardProps = {
   /** The first touch's subject, so the spam score reads the thread this step joins. */
   subject?: string;
   /** What the variables would be filled from, so a written variable is not scored as if it
-   *  were going to send blank. */
+   *  were going to send blank — and so the preview shows the copy as one lead will read it. */
   values?: Record<string, string | undefined>;
   /** When the step falls due, e.g. "in 3 days" — omitted where there is no anchor. */
   dueLabel?: string;
+  /** How many people have already been sent this step. A campaign that is running shows it,
+   *  because an edit from here on only reaches the leads still queued. */
+  sent?: number;
   onChange: (patch: Partial<FollowupStep>) => void;
   onRemove: () => void;
   /** A step something has already been sent to cannot change under the people who got it. */
@@ -38,6 +45,10 @@ type FollowupCardProps = {
  * The follow-up step card. A single's follow-ups and a campaign's are the same object
  * written by the same person, so they are the same component: wait N days, write the
  * message, drag it where it belongs, delete it. A second grammar for one job is a defect.
+ *
+ * The message is written with the same tools the composer uses, and previews through the
+ * same renderer the mail is built with, so a formatted follow-up reads here the way it
+ * will arrive.
  */
 export function FollowupCard({
   step,
@@ -45,6 +56,7 @@ export function FollowupCard({
   subject,
   values,
   dueLabel,
+  sent,
   onChange,
   onRemove,
   disabled,
@@ -55,6 +67,10 @@ export function FollowupCard({
   // A step waits a number of days or sits on a calendar day; the sender treats a date as
   // the stronger of the two, so the control switches which one is set.
   const dated = !!step.send_date;
+
+  const body = useRef<HTMLTextAreaElement>(null);
+  const [showPreview, setShowPreview] = useState(false);
+  const preview = previewEmailMarkdown(step.body_md, values ?? {});
 
   /** The same wait, expressed as the day it would land on, so switching modes keeps intent. */
   const asDate = () => {
@@ -76,11 +92,18 @@ export function FollowupCard({
           <GripVertical size={14} />
         </span>
         <b>{label}</b>
+        {sent ? (
+          <Tooltip label="Already sent this version — an edit reaches the leads still queued">
+            <small className="fufsent">{sent} sent</small>
+          </Tooltip>
+        ) : null}
         <SpamChip score={scoreMessage(step.subject_override || subject || "", step.body_md, values)} />
         <button
           type="button"
           className="btn-icon"
+          disabled={disabled}
           aria-label={`Remove ${label.toLowerCase()}`}
+          title={disabled ? "Something has already been sent to this step" : undefined}
           onClick={onRemove}
         >
           <Trash2 size={14} />
@@ -134,6 +157,7 @@ export function FollowupCard({
       />
 
       <textarea
+        ref={body}
         className="fuftext"
         value={step.body_md}
         disabled={disabled}
@@ -141,6 +165,35 @@ export function FollowupCard({
         placeholder="Write the follow-up in markdown..."
         onChange={(event) => onChange({ body_md: event.target.value })}
       />
+
+      <div className="fufformat">
+        <FormatToolbar
+          target={body}
+          value={step.body_md}
+          onChange={(next) => onChange({ body_md: next })}
+          disabled={disabled}
+        />
+        <Tooltip label={showPreview ? "Hide the preview" : "See it as the recipient will"}>
+          <button
+            type="button"
+            className={`composerpreviewtoggle${showPreview ? " on" : ""}`}
+            aria-pressed={showPreview}
+            disabled={disabled}
+            onClick={() => setShowPreview((shown) => !shown)}
+          >
+            {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
+            {showPreview ? "Hide preview" : "Preview"}
+          </button>
+        </Tooltip>
+      </div>
+
+      {showPreview && (
+        <div
+          className="fufpreview mdarticle"
+          aria-label={`How ${label.toLowerCase()} will read`}
+          dangerouslySetInnerHTML={{ __html: preview }}
+        />
+      )}
     </div>
   );
 }

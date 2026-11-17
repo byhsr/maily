@@ -28,3 +28,17 @@ export function missingVariables(template: string, values: Record<string, string
   }
   return [...missing];
 }
+
+/**
+ * How long a campaign takes to send, as the setup form puts it: hours while the pace is
+ * what decides, days once a day cannot hold the audience.
+ *
+ * The caps are ceilings rather than speeds. A campaign sends one email per interval and
+ * stops for the day when it has spent its cap — so a cap of 50 a day against 42 leads is
+ * still 42 sends at the pace, not a day's worth spread over the clock.
+ */
+export function sendEstimate(leads: number, perHour: number, cap: number, accountCap: number): string {
+  const perDay = Math.max(1, Math.min(perHour * 24, cap || Number.POSITIVE_INFINITY, accountCap || Number.POSITIVE_INFINITY));
+  if (leads <= perDay) return `${Math.max(1, Math.round(leads / perHour))}h`;
+  return `${Math.ceil(leads / perDay)}d`;
+}

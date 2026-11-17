@@ -306,6 +306,11 @@ struct StepInput {
     template_id: Option<String>,
     subject: Option<String>,
     body: Option<String>,
+    /// The step as written and as rendered: the markdown, and the HTML and text it
+    /// produced. Both keep their `{{variables}}` — one step goes to a whole audience, so
+    /// they are resolved per lead on the way out, never here.
+    body_html: Option<String>,
+    body_text: Option<String>,
     delay_minutes: Option<i64>,
     send_date: Option<String>,
 }
@@ -1078,13 +1083,15 @@ async fn save_steps(
             continue;
         }
         let delay = step.delay_minutes.unwrap_or(0).max(0);
-        sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,template_id,body_md,subject_override,enabled,send_date) VALUES(?,?,?,?,?,?,?,1,?)")
+        sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,template_id,body_md,body_html,body_text,subject_override,enabled,send_date) VALUES(?,?,?,?,?,?,?,?,?,1,?)")
             .bind(id())
             .bind(&campaign_id)
             .bind((index + 1) as i64)
             .bind(delay)
             .bind(trimmed(&step.template_id))
             .bind(body)
+            .bind(trimmed(&step.body_html))
+            .bind(trimmed(&step.body_text))
             .bind(trimmed(&step.subject))
             .bind(trimmed(&step.send_date))
             .execute(&mut *tx)
@@ -3226,9 +3233,10 @@ async fn ensure_job(
     Ok((job, payload))
 }
 
-// Resolve `{{key}}` and `{{key|fallback}}` against a lookup that reads the lead's
-// standard columns first, then any CSV/XLSX header preserved in custom_fields.
-fn resolve_variables(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+/// Substitutes `{{key}}` and `{{key|fallback}}` from `lookup`. `escape` is for text on its
+/// way into HTML, where a substituted value is content and never markup: a company called
+/// `Barnes & Noble` must not become an entity, and a name containing `<` must not open a tag.
+fn resolve_variables(text: &str, lookup: &dyn Fn(&str) -> Option<String>, escape: bool) -> String {
     let mut out = String::new();
     let mut rest = text;
     while let Some(start) = rest.find("{{") {
@@ -3240,9 +3248,14 @@ fn resolve_variables(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Str
                     Some((key, fallback)) => (key.trim(), Some(fallback.trim())),
                     None => (after[..end].trim(), None),
                 };
-                match lookup(key).filter(|value| !value.is_empty()) {
-                    Some(value) => out.push_str(&value),
-                    None => out.push_str(fallback.unwrap_or("")),
+                let value = match lookup(key).filter(|value| !value.is_empty()) {
+                    Some(value) => value,
+                    None => fallback.unwrap_or("").to_string(),
+                };
+                if escape {
+                    out.push_str(&escape_html(&value));
+                } else {
+                    out.push_str(&value);
                 }
                 rest = &after[end + 2..];
             }
@@ -3254,6 +3267,16 @@ fn resolve_variables(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Str
     }
     out.push_str(rest);
     out
+}
+
+/// The characters that would otherwise be read as markup. A substituted value is a name, a
+/// company, or a column out of a spreadsheet: none of it is HTML, and none of it is ours.
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// The lead columns a message may interpolate, which is exactly the set the lookup below
@@ -3271,13 +3294,25 @@ const STANDARD_VARIABLES: &[&str] = &[
 ];
 
 fn render(text: &str, lead: &sqlx::sqlite::SqliteRow) -> String {
-    // Every source column is preserved in custom_fields during import, so templates can
-    // use {{Any CSV Header}} without a schema change. Standard columns come first.
+    resolve_variables(text, &lead_lookup(lead), false)
+}
+
+/// The same variables, resolved into HTML rather than text: a campaign step keeps its
+/// `{{variables}}` because one step goes to every lead, and this is where they become one
+/// lead's words. The substitution is escaped — the value lands inside markup.
+fn render_html(text: &str, lead: &sqlx::sqlite::SqliteRow) -> String {
+    resolve_variables(text, &lead_lookup(lead), true)
+}
+
+/// What a message may ask a lead for: its own columns first, then every header the import
+/// preserved in `custom_fields`, so a template can use {{Any CSV Header}} without a schema
+/// change.
+fn lead_lookup(lead: &sqlx::sqlite::SqliteRow) -> impl Fn(&str) -> Option<String> + '_ {
     let custom = lead
         .try_get::<String, _>("custom_fields")
         .ok()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let lookup = |key: &str| -> Option<String> {
+    move |key: &str| -> Option<String> {
         let standard = match key {
             "first_name" => lead.get::<Option<String>, _>("first_name"),
             "last_name" => lead.get::<Option<String>, _>("last_name"),
@@ -3302,8 +3337,7 @@ fn render(text: &str, lead: &sqlx::sqlite::SqliteRow) -> String {
             }
         }
         None
-    };
-    resolve_variables(text, &lookup)
+    }
 }
 
 /// The variables a message may use: the lead's own columns, then every header the lead
@@ -3898,8 +3932,15 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
     // A template's body still resolves its variables against the lead; a single's step
     // arrived already rendered, so this is a no-op for it.
     let body = render(&body, &lead);
+    // A campaign step keeps its `{{variables}}` in the stored HTML, because the one step
+    // goes to every lead; this is where they become this lead's words. A single's step
+    // arrived resolved already, which resolves to itself.
+    let html = html_source.as_deref().map(|html| render_html(html, &lead));
     // Never send a literal placeholder: block the send and flag the lead for review.
-    if subject.contains("{{") || body.contains("{{") {
+    if subject.contains("{{")
+        || body.contains("{{")
+        || html.as_deref().is_some_and(|html| html.contains("{{"))
+    {
         sqlx::query("UPDATE leads SET status='needs_attention',updated_at=? WHERE id=?")
             .bind(now())
             .bind(lead_id)
@@ -3912,8 +3953,8 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
     if thread_ref.is_some() && !subject.to_lowercase().starts_with("re:") {
         subject = format!("Re: {}", subject);
     }
-    // A campaign step sends its template as plain text; a single's step and any
-    // hand-written mail carry the rendered HTML part their renderer produced.
+    // Both halves when the step carries a rendered pair, the text alone when there is none —
+    // a campaign's first touch is still written as plain text.
     let mail = Mail {
         from: &from,
         to: &to,
@@ -3921,7 +3962,7 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         bcc: "",
         subject: &subject,
         text: &body,
-        html: html_source.as_deref(),
+        html: html.as_deref(),
         thread: thread_ref.as_deref(),
     };
     let mut access = access_token(st, account_id, &provider, false).await?;
@@ -3961,7 +4002,7 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         .bind(&subject)
         .bind(&body)
         .bind(&markdown_source)
-        .bind(&html_source)
+        .bind(&html)
         .bind(step)
         .bind(&ws)
         .bind(now())

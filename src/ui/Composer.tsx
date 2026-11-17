@@ -1,21 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Bold,
-  Braces,
-  Code,
-  Eye,
-  EyeOff,
-  Italic,
-  Link2,
-  List,
-  ListOrdered,
-  Maximize2,
-  Minimize2,
-  Plus,
-  Quote,
-  Trash2,
-  X,
-} from "lucide-react";
+import { Eye, EyeOff, Maximize2, Minimize2, Plus, X } from "lucide-react";
 import { deleteDraft, saveDraft, sendMessage } from "../lib/api";
 import { emailHtmlToText, previewEmailMarkdown, renderEmailMarkdown } from "../lib/email";
 import { scoreMessage } from "../lib/spam";
@@ -24,6 +8,7 @@ import { Button } from "./Button";
 import { Checkbox } from "./Checkbox";
 import { ChipsInput } from "./ChipsInput";
 import { FollowupCard } from "./FollowupCard";
+import { FormatToolbar, wrapSelection } from "./FormatToolbar";
 import { Select } from "./Select";
 import { SpamChip, SpamPanel } from "./SpamScore";
 import { Tooltip } from "./Tooltip";
@@ -230,44 +215,6 @@ export function Composer({ mode, accounts, thread, draft, variant = "docked", on
     };
   }, []);
 
-  const edit = (before: string, after: string, seed = "") => {
-    const element = body.current;
-    // The format tools belong to the message; on another tab they bring it back first.
-    if (!element) {
-      setTab("message");
-      return;
-    }
-    const { selectionStart, selectionEnd } = element;
-    const chosen = markdown.slice(selectionStart, selectionEnd) || seed;
-    setMarkdown(markdown.slice(0, selectionStart) + before + chosen + after + markdown.slice(selectionEnd));
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(selectionStart + before.length, selectionStart + before.length + chosen.length);
-    });
-  };
-
-  const prefixLines = (marker: string) => {
-    const element = body.current;
-    if (!element) {
-      setTab("message");
-      return;
-    }
-    const { selectionStart, selectionEnd } = element;
-    const from = markdown.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
-    const block = markdown
-      .slice(from, selectionEnd)
-      .split("\n")
-      .map((line) => marker + line)
-      .join("\n");
-    setMarkdown(markdown.slice(0, from) + block + markdown.slice(selectionEnd));
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(from, from + block.length);
-    });
-  };
-
-  const insert = (text: string) => edit("", "", text);
-
   /* ---------- Follow-ups ---------- */
 
   const addFollowup = () => {
@@ -397,13 +344,14 @@ export function Composer({ mode, accounts, thread, draft, variant = "docked", on
           setShowPreview((shown) => !shown);
         } else if (mod && event.key.toLowerCase() === "b") {
           event.preventDefault();
-          edit("**", "**", "bold");
+          // The tools belong to the message: on another tab a press brings it back first.
+          if (!wrapSelection(body, markdown, setMarkdown, "**", "**", "bold")) setTab("message");
         } else if (mod && event.key.toLowerCase() === "i") {
           event.preventDefault();
-          edit("*", "*", "italic");
+          if (!wrapSelection(body, markdown, setMarkdown, "*", "*", "italic")) setTab("message");
         } else if (mod && event.key.toLowerCase() === "k") {
           event.preventDefault();
-          edit("[", "](https://)", "text");
+          if (!wrapSelection(body, markdown, setMarkdown, "[", "](https://)", "text")) setTab("message");
         }
       }}
     >
@@ -602,6 +550,7 @@ export function Composer({ mode, accounts, thread, draft, variant = "docked", on
                 step={step}
                 label={`Follow-up ${index + 1}`}
                 subject={subject}
+                values={values}
                 dueLabel={dueLabel(cumulativeDays[index])}
                 onChange={(patch) => patchFollowup(index, patch)}
                 onRemove={() => removeFollowup(index)}
@@ -643,53 +592,12 @@ export function Composer({ mode, accounts, thread, draft, variant = "docked", on
       </div>
 
       <footer className="composerfoot">
-        <div className="composerformat">
-          <Tooltip label="Bold">
-            <button type="button" className="btn-icon" onClick={() => edit("**", "**", "bold")}>
-              <Bold size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Italic">
-            <button type="button" className="btn-icon" onClick={() => edit("*", "*", "italic")}>
-              <Italic size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Link">
-            <button type="button" className="btn-icon" onClick={() => edit("[", "](https://)", "text")}>
-              <Link2 size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Bullet list">
-            <button type="button" className="btn-icon" onClick={() => prefixLines("- ")}>
-              <List size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Numbered list">
-            <button type="button" className="btn-icon" onClick={() => prefixLines("1. ")}>
-              <ListOrdered size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Quote">
-            <button type="button" className="btn-icon" onClick={() => prefixLines("> ")}>
-              <Quote size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Code">
-            <button type="button" className="btn-icon" onClick={() => edit("`", "`", "code")}>
-              <Code size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Insert a variable">
-            <button type="button" className="btn-icon" onClick={() => insert("{{first_name}}")}>
-              <Braces size={16} />
-            </button>
-          </Tooltip>
-          <Tooltip label="Insert the company variable">
-            <button type="button" className="btn-icon" onClick={() => insert("{{company}}")}>
-              <span className="composervar">company</span>
-            </button>
-          </Tooltip>
-        </div>
+        <FormatToolbar
+          target={body}
+          value={markdown}
+          onChange={setMarkdown}
+          onUnavailable={() => setTab("message")}
+        />
 
         <div className="composerfootright">
           {saved && !busy && <span className="composersaved">Saved</span>}

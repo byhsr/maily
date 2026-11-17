@@ -47,11 +47,15 @@ export const upsertLeads = (leads: Record<string, unknown>[]) =>
 export const saveCampaign = (input: Record<string, unknown>) =>
   api<string>("save_campaign", { input });
 
-/** One follow-up, carrying its own message: the copy taken when a template was picked. */
+/** One follow-up, carrying its own message: the copy taken when a template was picked. The
+ *  rendered pair travels with it, and keeps its `{{variables}}` — one step goes to every
+ *  lead in the audience, so the sender resolves them per delivery. */
 export type CampaignStepInput = {
   template_id?: string | null;
   subject?: string | null;
   body?: string | null;
+  body_html?: string | null;
+  body_text?: string | null;
   delay_minutes?: number | null;
   send_date?: string | null;
 };

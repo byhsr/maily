@@ -27,9 +27,9 @@ import {
   saveCampaign,
   saveSteps,
 } from "../lib/api";
-import { previewEmailMarkdown } from "../lib/email";
+import { previewEmailMarkdown, renderEmailTemplate } from "../lib/email";
 import { detectMapping, importMapped, readSheet, type LeadMapping } from "../lib/leadImport";
-import { missingVariables } from "../lib/logic";
+import { missingVariables, sendEstimate } from "../lib/logic";
 import { inZone, ZONES, zonedInstant, zoneLabel } from "../lib/timezones";
 import type {
   Account,
@@ -273,13 +273,21 @@ export function Campaign({
       await saveCampaign({ ...payload(), ...extra });
       await saveSteps(
         campaign.id,
-        steps.map((step) => ({
-          template_id: step.template_id || null,
-          subject: step.subject || null,
-          body: step.body || null,
-          delay_minutes: Math.max(0, Math.round(step.delay_minutes)),
-          send_date: step.send_date,
-        }))
+        steps.map((step) => {
+          // The step is stored as written and as rendered: the markdown is the copy, the
+          // pair beside it is what goes out. `renderEmailTemplate` leaves the
+          // `{{variables}}` standing, because this one step is sent to every lead.
+          const rendered = renderEmailTemplate(step.body || "");
+          return {
+            template_id: step.template_id || null,
+            subject: step.subject || null,
+            body: step.body || null,
+            body_html: step.body.trim() ? rendered.html : null,
+            body_text: step.body.trim() ? rendered.text : null,
+            delay_minutes: Math.max(0, Math.round(step.delay_minutes)),
+            send_date: step.send_date,
+          };
+        })
       );
     },
     [campaign.id, payload, steps]
@@ -409,17 +417,17 @@ export function Campaign({
   // ---- Pace, cap and start -----------------------------------------------------------
 
   // There is no daily window any more: a campaign sends at any hour, held back only by its
-  // pace, its cap and the start it was given.
+  // pace, its cap and the start it was given. The pace is one email per interval, and the
+  // scheduler holds the whole campaign to it, so this many an hour whatever the audience.
   const perHour = Math.max(1, Math.round(60 / (Number(interval) || 5)));
   const cap = Number(capText) || 0;
-  const accountCap = accounts.reduce((total, account) => total + (account.daily_limit || 0), 0);
-  // The campaign's own cap and the account's cap both apply, so the lower one decides.
-  const perDay = Math.max(
-    1,
-    Math.min(perHour * 24, cap || Number.MAX_SAFE_INTEGER, accountCap || Number.MAX_SAFE_INTEGER)
+  // A campaign sends from one mailbox, so its ceiling is that account's. With no account
+  // chosen any of them may send, and the sum stands in.
+  const accountCap = (accountId ? accounts.filter((account) => account.id === accountId) : accounts).reduce(
+    (total, account) => total + (account.daily_limit || 0),
+    0
   );
-  const days = audience.length / perDay;
-  const estimate = days < 1 ? `${Math.max(1, Math.round(days * 24))}h` : `${Math.ceil(days)}d`;
+  const estimate = sendEstimate(audience.length, perHour, cap, accountCap);
   /** A start still ahead of us: the campaign is held until then. */
   const pendingStart = !!scheduledAt && new Date(scheduledAt).getTime() > Date.now();
   /** The zone the schedule reads in — where it was set, or the one being picked. */
@@ -672,8 +680,9 @@ export function Campaign({
           <div className="setupmain">
             {locked && (
               <p className="locknote">
-                This campaign has started. Only the pace, the sending account and the steps nothing has
-                been sent to yet can still change.
+                This campaign has started. The first email and any step nothing has been sent to yet can
+                still be changed — an edit reaches the leads still queued and leaves the ones already
+                sent with what they got. The audience is fixed once it is running.
               </p>
             )}
 
@@ -824,9 +833,10 @@ export function Campaign({
                           subject_override: step.subject,
                           send_date: step.send_date,
                         }}
-                        label={stepLocked ? `Follow-up ${index + 1} · already sent` : `Follow-up ${index + 1}`}
+                        label={`Follow-up ${index + 1}`}
                         subject={subject}
                         values={sampleValues}
+                        sent={stepSent}
                         disabled={stepLocked}
                         onChange={(patch) =>
                           patchStep(index, {

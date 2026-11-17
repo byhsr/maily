@@ -157,6 +157,18 @@ export function renderEmailMarkdown(
 }
 
 /**
+ * The same renderer with the variables left standing, for copy that one step sends to a
+ * whole audience. A campaign's lead is only known at delivery, so resolving here would
+ * bake one person's values into everybody's message: the sender fills them per lead
+ * instead, escaping the value in the HTML half so an ampersand in a company name stays
+ * text.
+ */
+export function renderEmailTemplate(source: string): EmailParts {
+  const clean = sanitize(source);
+  return { html: inlineStyles(clean), text: toPlainText(clean) };
+}
+
+/**
  * The live preview: the same message, in the app's own colours. On screen the app's
  * stylesheet dresses the tags, so nothing is inlined and a message stays legible on the
  * dark surface; the text and structure are exactly what is sent.
