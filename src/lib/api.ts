@@ -217,6 +217,11 @@ export const listWorkspaces = () => api<WorkspaceList>("list_workspaces");
 export const createWorkspace = (name: string) => api<string>("create_workspace", { name });
 export const renameWorkspace = (id: string, name: string) => api<void>("rename_workspace", { id, name });
 export const switchWorkspace = (id: string) => api<void>("switch_workspace", { id });
+/** Empties the active workspace: its campaigns, its audience and the history of both. Connected
+ *  accounts, saved keys and the suppression list stay. A copy of the database is written first,
+ *  and its path comes back with what was removed. */
+export const cleanWorkspace = () =>
+  api<{ backup: string; removed: Record<string, number> }>("clean_workspace");
 
 /** The Postmaster: SPF, DKIM, DMARC and MX for a sending domain, scored as a risk. */
 export const domainPosture = (domain: string) => api<DomainPosture>("domain_posture", { domain });

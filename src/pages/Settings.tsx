@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   accountPermissions,
   awaitOauthRedirect,
+  cleanWorkspace,
   clearOpenrouterKey,
   disconnectAccount,
   finishOauth,
@@ -67,6 +68,8 @@ type SettingsProps = {
   section?: string;
   /** Called after an account is connected or removed, so the sidebar can refresh. */
   onAccountsChange?: () => void;
+  /** Called after the workspace is emptied, so everything listing its data can refetch. */
+  onWorkspaceCleaned?: () => void;
 };
 
 const SLOTS: { key: keyof LlmSettings; label: string; hint: string }[] = [
@@ -98,7 +101,23 @@ function redirectPort(uri: string): number {
   }
 }
 
-export function Settings({ tell, workspace, onWorkspaceChange, section = "accounts", onAccountsChange }: SettingsProps) {
+/** What a clean removed, in words: "12 leads, 3 campaigns, 8 sends". Counts that were already
+ *  zero are left out, because a list of nothing but zeroes says nothing. */
+function describeRemoved(removed: Record<string, number>): string {
+  const parts: [number, string][] = [
+    [removed.leads, "lead"],
+    [removed.campaigns, "campaign"],
+    [removed.sends, "send"],
+    [removed.messages, "message"],
+    [removed.templates, "template"],
+  ];
+  const written = parts
+    .filter(([count]) => count > 0)
+    .map(([count, noun]) => `${count} ${noun}${count === 1 ? "" : "s"}`);
+  return written.length ? written.join(", ") : "nothing was left to remove";
+}
+
+export function Settings({ tell, workspace, onWorkspaceChange, section = "accounts", onAccountsChange, onWorkspaceCleaned }: SettingsProps) {
   const [tab, setTab] = useState<Section>(
     () => (SECTIONS.some((entry) => entry.key === section) ? (section as Section) : "accounts"),
   );
@@ -130,6 +149,12 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
   const [pending, setPending] = useState<PendingOAuth | null>(null);
   const [pasted, setPasted] = useState("");
   const [disconnecting, setDisconnecting] = useState<Account | null>(null);
+  /** The workspace clean, and what it left behind: kept on screen because the copy it made is
+   *  the one thing that would matter afterwards, and a toast is gone in four seconds. */
+  const [cleaning, setCleaning] = useState(false);
+  const [cleaned, setCleaned] = useState<{ backup: string; removed: Record<string, number> } | null>(
+    null,
+  );
   const [ready, setReady] = useState<Record<string, boolean>>({});
   const [advanced, setAdvanced] = useState(false);
   /** The last connect failure, kept on screen — a toast disappears before it is read. */
@@ -542,6 +567,24 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
       for (const account of accounts) await disconnectAccount(account.id);
       await loadAccounts();
       tell(`${accounts.length} account${accounts.length === 1 ? "" : "s"} disconnected`);
+    } catch (e) {
+      tell(String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  /** A fresh start for this workspace. Everything it holds goes; the connected mailboxes stay
+   *  connected — a reset should not mean asking Google for permission again — and the suppression
+   *  list stays, so nobody who asked not to be written to is written to. */
+  const cleanTheWorkspace = async () => {
+    setCleaning(false);
+    setBusy("clean");
+    try {
+      const result = await cleanWorkspace();
+      setCleaned(result);
+      onWorkspaceCleaned?.();
+      tell("Workspace cleaned");
     } catch (e) {
       tell(String(e));
     } finally {
@@ -1062,6 +1105,32 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
             </header>
             <div className="settingrow">
               <div>
+                <b>Clean this workspace</b>
+                <small>
+                  Removes every lead, campaign, send and reply in this workspace, with the
+                  templates, the inbox and the activity history. Your connected accounts, keys and
+                  settings stay, and so does the suppression list — so nobody who opted out gets
+                  written to again. A copy of the database is saved beside it first.
+                </small>
+                {cleaned && (
+                  <small className="settingresult">
+                    Cleaned: {describeRemoved(cleaned.removed)}. Everything as it was is in{" "}
+                    <code>{cleaned.backup}</code>
+                  </small>
+                )}
+              </div>
+              <div className="settingrow-control">
+                <Button
+                  variant="secondary"
+                  onClick={() => setCleaning(true)}
+                  disabled={busy === "clean"}
+                >
+                  {busy === "clean" ? "Cleaning…" : "Clean workspace"}
+                </Button>
+              </div>
+            </div>
+            <div className="settingrow">
+              <div>
                 <b>Disconnect every account</b>
                 <small>Removes all stored tokens. Campaigns stop sending until you reconnect.</small>
               </div>
@@ -1078,6 +1147,17 @@ export function Settings({ tell, workspace, onWorkspaceChange, section = "accoun
           </section>
         )}
       </div>
+
+      {cleaning && (
+        <Confirm
+          title={`Clean the workspace “${workspace}”?`}
+          message="Every lead, campaign, send and reply in it is removed, along with the templates, the inbox and the history. Your connected accounts and keys stay. A copy of the database is written beside it first, and this cannot be undone from inside the app."
+          confirmLabel="Clean workspace"
+          requireText={workspace}
+          onConfirm={cleanTheWorkspace}
+          onCancel={() => setCleaning(false)}
+        />
+      )}
 
       {disconnecting && (
         <Confirm

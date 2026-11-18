@@ -956,6 +956,25 @@ svg {
   line-height: 1.5;
 }
 
+/* The gate on an action that cannot be undone: the word to type, and the box for typing it. */
+.confirm-gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.confirm-gate b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.confirm-gate .prompt-input {
+  margin-bottom: 0;
+}
+
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
@@ -2029,6 +2048,23 @@ svg {
 
 .settingsdanger .btn-secondary {
   color: var(--danger);
+}
+
+/* What a destructive action just did, under the row it happened in. It stays rather than toasting
+   away, because the path it names is the only way back to what it removed. */
+.settingresult {
+  display: block;
+  margin-top: var(--s2);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.settingresult code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  word-break: break-all;
 }
 
 /* Connected sending accounts. */
