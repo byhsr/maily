@@ -36,7 +36,8 @@ export type CampaignLeadRow = {
   step_position?: number;
   /** Which first-touch subject line this lead was given, when the campaign is split. */
   subject_variant?: number | null;
-  /** When the next step falls due; null means it may send on the next tick. */
+  /** When the next step falls due, UTC. Null only until the page has worked it out and stored
+   *  it; the scheduler reads an empty one as due now. */
   next_due_at?: string | null;
   email: string;
   first_name?: string | null;
@@ -53,32 +54,107 @@ export type CampaignLeadRow = {
   suppressed?: boolean;
 };
 
-/** One answer a campaign received, or one message it sent. */
-export type CampaignEvent = {
+/** One lead's step inside a campaign, as the follow-ups panel lists it. The due time is the
+ *  one stored when the step before it was sent, never worked out from the delay again. */
+export type CampaignFollowupRow = {
   lead_id: string;
-  name: string;
-  kind: "sent" | "replied" | "bounced";
-  step?: number | null;
-  /** The subject, for an answer. Empty for a send. */
-  detail: string;
-  at: string;
-  message_id?: string | null;
+  email: string;
+  /** queued | sending | paused | done | failed. What the enrolment itself is doing. */
+  state: string;
+  /** Index of the step this lead is on; 0 is the first touch. */
+  step_position: number;
+  /** When the stored step falls due, UTC. Null only until the page has worked it out and
+   *  stored it, which it does the first time it reads the row. */
+  scheduled_at?: string | null;
+  /** Why a hand-sent step did not get through. */
+  last_error?: string | null;
+  /** What this step will go out with. A follow-up wears the first email's subject with one
+   *  `Re:` in front, which is what keeps it in the same conversation at the other end. */
+  subject?: string;
+  /** `active`, or whatever the lead was flagged as; anything else will not be sent to. */
+  lead_status: string;
+  /** An answer came back on this lead's thread. */
+  replied?: boolean;
+  /** On the suppression list, which is why nothing more will go out. */
+  suppressed?: boolean;
 };
 
-/** One row of the step funnel: what each step sent, earned, and still has waiting. */
+/** A campaign's follow-ups: every enrolment, and the one the strip reads. */
+export type CampaignFollowups = {
+  rows: CampaignFollowupRow[];
+  next: CampaignFollowupRow | null;
+};
+
+/** One line of a campaign's history, as the Activity tab reads it back. */
+export type CampaignActivityItem = {
+  id: string;
+  /** sent | scheduled | replied | bounced | skipped | send_now | paused | resumed. */
+  type: string;
+  at: string;
+  lead_id?: string | null;
+  email?: string | null;
+  step_position?: number | null;
+  /** The subject of a send or an answer; why a lead was skipped. */
+  detail: string;
+  metadata?: {
+    positive?: boolean;
+    reason?: string;
+    message_id?: string;
+    to?: string;
+    category?: string | null;
+  } | null;
+};
+
+/** A page of that history, newest first. */
+export type CampaignActivityPage = {
+  items: CampaignActivityItem[];
+  has_more: boolean;
+  offset: number;
+};
+
+/** One row of the step funnel. Every count is a count of leads except `sent`, which is emails:
+ *  a step that went to two leads wrote two. `leads` is how many got that far at all. */
 export type CampaignFunnelRow = {
   position: number;
+  leads: number;
   sent: number;
   replied: number;
-  pending: number;
+  waiting: number;
 };
 
-/** A campaign's tally. The reply rate is derived, so it cannot disagree with its parts. */
-export type CampaignStats = {
-  sent: number;
+/** A campaign's numbers, every one of them counted over leads rather than over rows. A lead
+ *  who answered twice answered once; the emails are a figure of their own, never a rate. */
+export type CampaignMetrics = {
+  /** Every lead enrolled in the campaign. */
+  total: number;
+  /** Leads with a sent email to their name. The denominator under every rate here. */
+  contacted: number;
+  /** Emails that went out, all steps together. Secondary, never the headline number. */
+  emails_sent: number;
   replied: number;
+  /** Percent of contacted leads. 0, not NaN, when nobody has been written to. */
+  reply_rate: number;
   positive: number;
   bounced: number;
+  unsubscribed: number;
+  bounce_rate: number;
+  unsubscribe_rate: number;
+  /** Emails per reply, or null when nothing has been answered. */
+  emails_per_reply: number | null;
+  /** Minutes from the email a lead answered to the answer, or null when none has. */
+  median_reply_minutes: number | null;
+  /** Leads whose sequence ran out. */
+  finished: number;
+  /** Everyone else: waiting, sending, or held. */
+  in_sequence: number;
+  /** Leads that received every step the sequence has. */
+  completed_sequence: number;
+  /** How many steps that is — the first email and every follow-up. */
+  steps: number;
+  completion_rate: number;
+  funnel: CampaignFunnelRow[];
+  /** Per-line tallies, present only when the campaign is split. */
+  subject_stats: SubjectStat[];
 };
 
 /** One follow-up in a campaign's sequence. Position 1 is the first follow-up; the first
@@ -98,9 +174,13 @@ export type CampaignStep = {
 export type SubjectStat = {
   position: number;
   subject: string;
+  /** The leads assigned to this line. */
   leads: number;
-  sent: number;
+  /** Of those, the ones it went to. The rate is over these, never over the leads assigned. */
+  contacted: number;
   replied: number;
+  /** Percent of contacted. 0, not NaN, when the line has not gone out. */
+  rate: number;
 };
 
 /** The campaign page's payload: settings, sequence, per-state counts, and every enrolment. */
@@ -111,14 +191,10 @@ export type CampaignDetail = {
   steps: CampaignStep[];
   /** The first-touch subject lines, in order. More than one means the audience is split. */
   subjects?: string[];
-  /** Per-line tallies, present only when the campaign is split. */
-  subject_stats?: SubjectStat[];
-  sent: number;
   /** Which stop rules this campaign obeys; every one is on unless turned off. */
   stop_rules?: StopRules;
-  stats?: CampaignStats;
-  funnel?: CampaignFunnelRow[];
-  recent?: CampaignEvent[];
+  /** Every number the page shows about the campaign, counted over leads. */
+  metrics?: CampaignMetrics;
   /** Lead ids whose mailbox answer was a bounce rather than a reply. */
   bounced?: string[];
 };
@@ -427,8 +503,8 @@ export type FollowupStep = {
   delay_days?: number | null;
   body_md?: string | null;
   subject_override?: string | null;
-  status: "pending" | "sent" | "skipped" | "cancelled" | "failed";
   scheduled_at?: string | null;
+  status: "pending" | "sent" | "skipped" | "cancelled" | "failed";
   sent_at?: string | null;
   due_at?: string | null;
 };

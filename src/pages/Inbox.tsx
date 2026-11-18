@@ -535,11 +535,11 @@ export function Inbox({ tell, account, onAccount, initialMessageId }: InboxProps
     if (selected) setFollowups(await threadFollowups(selected));
   };
 
-  /** Brings one pending follow-up forward so the next scheduler tick sends it. */
+  /** Brings one pending follow-up forward so the scheduler sends it on its next pass. */
   const sendStepNow = async (step: FollowupStep) => {
     try {
       await followupSendNow(step.id);
-      tell(`Follow-up ${step.position} will send on the next tick`);
+      tell(`Follow-up ${step.position} is due now`);
       await reloadFollowups();
     } catch (error) {
       tell(String(error));
@@ -654,7 +654,7 @@ export function Inbox({ tell, account, onAccount, initialMessageId }: InboxProps
                 onClick={async () => {
                   try {
                     await followupSendNow(item.id);
-                    tell("Sending on the next tick");
+                    tell("Sent now");
                     await refresh();
                   } catch (error) {
                     tell(String(error));

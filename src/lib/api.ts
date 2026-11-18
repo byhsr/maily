@@ -4,7 +4,9 @@ import type {
   AgentDef,
   AgentRun,
   Campaign,
+  CampaignActivityPage,
   CampaignDetail,
+  CampaignFollowups,
   Channel,
   DashboardData,
   DashboardStats,
@@ -23,6 +25,7 @@ import type {
   ScheduledItem,
   SentMessage,
   StopRules,
+  StatsPoint,
   Template,
   ThreadFollowups,
   WorkspaceList,
@@ -135,6 +138,21 @@ export const exportCampaignCsv = (campaignId: string) => api<string>("export_cam
 /** Stops one lead inside one campaign; the shared step is left alone. */
 export const campaignLeadAction = (campaignId: string, leadId: string, action: "skip" | "pause") =>
   api<void>("campaign_lead_action", { campaignId, leadId, action });
+/** A campaign's follow-ups, every enrolment and the one that is next, with the due times as
+ *  they were stored when the step before each was sent. */
+export const campaignFollowups = (campaignId: string) =>
+  api<CampaignFollowups>("campaign_followups", { campaignId });
+/** Sends one lead's waiting step now, through the same sender the scheduler uses. The step is
+ *  claimed on the way in, so only one caller can ever send it. */
+export const campaignFollowupSendNow = (campaignId: string, leadId: string) =>
+  api<void>("campaign_followup_send_now", { campaignId, leadId });
+/** One campaign's history, a page at a time, newest first. `kind` is one event type, or several
+ *  comma-separated for a filter that covers more than one. */
+export const campaignActivity = (campaignId: string, kind: string, offset: number) =>
+  api<CampaignActivityPage>("campaign_activity", { campaignId, kind, offset });
+/** Sends and replies per day, for the campaign's chart. */
+export const campaignSeries = (campaignId: string, days: number) =>
+  api<StatsPoint[]>("campaign_series", { campaignId, days });
 
 export const syncInbox = (accountId?: string) => api<number>("sync_inbox", { accountId: accountId ?? null });
 export const classifyInbox = (useAgent: boolean) => api<number>("classify_inbox", { useAgent });
@@ -207,7 +225,7 @@ export const domainPosture = (domain: string) => api<DomainPosture>("domain_post
  *  permission is needed, and the domain has to be verified in Postmaster Tools. */
 export const postmasterReport = (domain: string, accountId?: string | null) =>
   api<PostmasterReport>("postmaster_report", { domain, accountId: accountId ?? null });
-/** Bring one follow-up forward so the next tick sends it. */
+/** Bring one follow-up forward so the scheduler sends it on its next pass. */
 export const followupSendNow = (stepId: string) => api<void>("followup_send_now", { stepId });
 export const followupCancel = (stepId: string) => api<void>("followup_cancel", { stepId });
 /** One edited follow-up, re-rendered by the composer through the shared renderer. */

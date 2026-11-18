@@ -17,6 +17,8 @@ import {
 } from "lucide-react";
 import {
   campaignDetail,
+  campaignFollowupSendNow,
+  campaignFollowups,
   campaignLeadAction,
   deleteCampaign,
   duplicateCampaign,
@@ -29,6 +31,23 @@ import {
   saveSteps,
 } from "../lib/api";
 import { previewEmailMarkdown, renderEmailTemplate } from "../lib/email";
+import {
+  canSend,
+  claimRow,
+  dueText,
+  followupStatus,
+  heldWhy,
+  leadStatus,
+  noFollowupsText,
+  progressText,
+  sendBlockedReason,
+  stepFilters,
+  stepLabel,
+  visibleFollowups,
+  whenAt,
+  type LeadStatus,
+  type QueuePace,
+} from "../lib/followups";
 import { detectMapping, importMapped, readSheet, type LeadMapping } from "../lib/leadImport";
 import { missingVariables, sendEstimate } from "../lib/logic";
 import { inZone, ZONES, zonedInstant, zoneLabel } from "../lib/timezones";
@@ -36,8 +55,10 @@ import type {
   Account,
   Campaign as CampaignType,
   CampaignDetail,
-  CampaignEvent,
+  CampaignFollowupRow,
+  CampaignFollowups,
   CampaignLeadRow,
+  CampaignMetrics,
   Lead,
   LeadList,
   StopRules,
@@ -45,13 +66,17 @@ import type {
 } from "../lib/types";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
+import { CampaignActivity } from "../ui/CampaignActivity";
+import { CampaignAnalytics } from "../ui/CampaignAnalytics";
 import { Checkbox } from "../ui/Checkbox";
 import { Confirm } from "../ui/Confirm";
+import { FilterChip } from "../ui/FilterChip";
 import { FollowupCard } from "../ui/FollowupCard";
 import { FormatToolbar } from "../ui/FormatToolbar";
 import { Input } from "../ui/Input";
 import { OverflowMenu } from "../ui/OverflowMenu";
 import { PageHeader } from "../ui/PageHeader";
+import { Pager } from "../ui/Pager";
 import { Select } from "../ui/Select";
 import { Tooltip } from "../ui/Tooltip";
 import { useVariableSuggest, VariableInput, VariableMenu } from "../ui/VariableTextarea";
@@ -111,16 +136,6 @@ const MAX_FOLLOWUPS = 5;
 const MAX_SUBJECTS = 5;
 const STOP_DEFAULTS: StopRules = { reply: true, bounce: true, ooo: true };
 
-function when(iso?: string | null): string {
-  if (!iso) return "—";
-  const at = new Date(iso);
-  if (Number.isNaN(at.getTime())) return "—";
-  const today = new Date();
-  return at.toDateString() === today.toDateString()
-    ? at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : at.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
 /** How far off a moment is, in the coarsest useful unit — "3m", "2h", "4d". */
 function away(iso?: string | null): string {
   if (!iso) return "—";
@@ -132,8 +147,10 @@ function away(iso?: string | null): string {
   return `${Math.round(minutes / 1440)}d`;
 }
 
-/** What a lead row is, as one word. Order matters: a suppression outranks everything. */
-function leadStatus(row: CampaignLeadRow, bounced: string[], emails: number): string {
+/** What an enrolment in the setup tab's audience table is, as one word. Order matters: a
+ *  suppression outranks everything. The List tab asks the same question of the same rows and
+ *  answers it in its own vocabulary, which is `leadStatus` in the follow-ups module. */
+function audienceStatus(row: CampaignLeadRow, bounced: string[], emails: number): string {
   if (row.suppressed) return "Unsubscribed";
   if (bounced.includes(row.lead_id)) return "Bounced";
   if (row.replied) return "Replied";
@@ -143,11 +160,85 @@ function leadStatus(row: CampaignLeadRow, bounced: string[], emails: number): st
   return (row.sent_steps ?? 0) > 0 ? "Sent" : "Pending";
 }
 
-const EVENT_LABEL: Record<string, string> = {
-  sent: "Sent",
-  replied: "Replied",
-  bounced: "Bounced",
+/** Which subject line a lead was given, as the letter the analytics writes it with. A campaign
+ *  that was never split has one line, and one line is not a variant. */
+function variantLabel(variant: number | null | undefined, subjects: string[]): string {
+  if (variant === null || variant === undefined || subjects.length < 2) return "—";
+  const line = subjects[variant];
+  return line ? `${String.fromCharCode(65 + variant)} · ${line}` : "—";
+}
+
+/** The three views the reading half of the page is made of. Setup is a mode of its own — a
+ *  campaign being written rather than read — so these sit beside it rather than among it. */
+const ANALYTICS_TABS = ["analytics", "activity", "list"] as const;
+type AnalyticsTab = (typeof ANALYTICS_TABS)[number];
+
+const ANALYTICS_LABEL: Record<AnalyticsTab, string> = {
+  analytics: "Analytics",
+  activity: "Activity",
+  list: "List",
 };
+
+/** Where a campaign opens when the shell does not say: its setup. Which is where a campaign is
+ *  created and where what has just been made gets written, so it is the one view that is never
+ *  surprising to land on. The reading half keeps its own default of the numbers, which is
+ *  `analyticsTab`'s fallback, and its three views sit together however this got here. */
+const DEFAULT_VIEW = "sequence";
+
+/** The view is mirrored into the URL as well as held in the shell's trail, so the tab a campaign
+ *  is on can be read off the window and linked to. The trail is what restores it — it is the
+ *  app's own history — and this is only ever written, never read back: a campaign that is opened
+ *  says which tab it opens on, and filling one in from what was left behind is how a new
+ *  campaign came to open on somebody else's numbers. */
+function writeTabToUrl(view: string) {
+  if (typeof window === "undefined") return;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", view);
+    // Replaced rather than pushed: the app's own back and forward already walk the tabs, and a
+    // second history of the same journey would fight with the first.
+    window.history.replaceState(null, "", url.toString());
+  } catch {
+    // A window that will not take a URL still works; it just does not advertise the tab.
+  }
+}
+
+/** The zeros a campaign with nothing behind it reads as, so every card has a number before the
+ *  first fetch has landed and none of them has to guard against a missing one. */
+const NO_METRICS: CampaignMetrics = {
+  total: 0,
+  contacted: 0,
+  emails_sent: 0,
+  replied: 0,
+  reply_rate: 0,
+  positive: 0,
+  bounced: 0,
+  unsubscribed: 0,
+  bounce_rate: 0,
+  unsubscribe_rate: 0,
+  emails_per_reply: null,
+  median_reply_minutes: null,
+  finished: 0,
+  in_sequence: 0,
+  completed_sequence: 0,
+  steps: 1,
+  completion_rate: 0,
+  funnel: [],
+  subject_stats: [],
+};
+
+/** The statuses the list can be filtered to, in the order it shows them. */
+const LEAD_STATUSES: LeadStatus[] = [
+  "Queued",
+  "In sequence",
+  "Replied",
+  "Bounced",
+  "Unsubscribed",
+  "Finished",
+];
+
+/** How many lead rows one page of the list holds. */
+const LEAD_PAGE = 25;
 
 export function Campaign({
   campaign,
@@ -212,6 +303,41 @@ export function Campaign({
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [picked, setPicked] = useState<string[]>([]);
+  /** The follow-ups panel's own read, kept off `detail`: it is the one thing on this page
+   *  whose rows change without the campaign's own numbers moving. */
+  const [followups, setFollowups] = useState<CampaignFollowups | null>(null);
+  /** Which step the panel is narrowed to: "All", or a position as a string. */
+  const [stepFilter, setStepFilter] = useState("All");
+  /** Whether the panel is also showing the rows that are settled — sent, skipped. */
+  const [showSettled, setShowSettled] = useState(false);
+  /** What the row a hand-send was just attempted for came back with. */
+  const [rowError, setRowError] = useState<{ lead_id: string; message: string } | null>(null);
+  /** The row whose Send now confirmation is open. */
+  const [confirmingSend, setConfirmingSend] = useState<CampaignFollowupRow | null>(null);
+  /** The list's own reading of the audience: by email, by what each lead is doing, a page at
+   *  a time. Separate from the setup tab's search, which is there to pick leads to act on. */
+  const [listQuery, setListQuery] = useState("");
+  const [listStatus, setListStatus] = useState("All");
+  const [listPage, setListPage] = useState(0);
+  /** The clock the panel reads its times against, so "in 4h" is not frozen at mount. */
+  const [clock, setClock] = useState(() => Date.now());
+
+  /** What the campaign's own pace means for the queue, worked out once for every row. A campaign
+   *  sends one email at a time, so a row whose moment has passed while the send in front of it is
+   *  still being spaced out is waiting its turn rather than late — and a row on a campaign that
+   *  is not running at all is held, which is the campaign's doing, not the row's. */
+  const lastSend = campaign.last_sent_at ? Date.parse(campaign.last_sent_at) : Number.NaN;
+  const pace: QueuePace = {
+    // Throttled is the scheduler's own flag for "waiting on capacity", and it keeps looking at
+    // the campaign, so a row on one is waiting its turn like any other. Paused is the state a
+    // person chose, and that is what holds a queue.
+    running: campaign.status === "active" || campaign.status === "throttled",
+    heldWhy: heldWhy(campaign.status),
+    slotAt: Number.isFinite(lastSend)
+      ? lastSend + (campaign.interval_minutes || 0) * 60_000
+      : null,
+    nextId: followups?.next?.lead_id ?? null,
+  };
 
   /** The line the sequence reads as "email 1's subject": the first that was actually
    *  written, so an empty first slot with a filled second still reads as having one. */
@@ -238,10 +364,25 @@ export function Campaign({
     }
   }, [campaign.id]);
 
+  /** The panel's own read: a hand-send moves these rows and nothing else on the page. */
+  const refreshFollowups = useCallback(async () => {
+    try {
+      setFollowups(await campaignFollowups(campaign.id));
+    } catch (e) {
+      tell(String(e));
+    }
+  }, [campaign.id]);
+
+  /** Both halves of the analytics view, so a poll or an action can never update one of them
+   *  and leave the other saying something that has stopped being true. */
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refresh(), refreshFollowups()]);
+  }, [refresh, refreshFollowups]);
+
   const loadLists = () => listLeadLists().then(setLists).catch((e) => tell(String(e)));
 
   useEffect(() => {
-    refresh();
+    refreshAll();
     loadLists();
     listAccounts().then(setAccounts).catch(() => {});
   }, [campaign.id]);
@@ -252,12 +393,26 @@ export function Campaign({
    *  bodies of steps nothing has been sent to yet. */
   const locked = status !== "draft";
 
-  // Keep the numbers live while it sends.
+  /** Whether anything in the panel can still move on its own: a row waiting on a tick, one
+   *  mid-send, or one the sender failed on and a hand can pick back up. */
+  const followupsLive =
+    followups?.rows.some((row) => row.state === "sending" || canSend(row)) ?? false;
+
+  // Keep the numbers live while it sends, and the follow-up times live while anything is
+  // waiting on one: a campaign that reads as completed can still have a row left to send.
   useEffect(() => {
-    if (!running) return;
-    const timer = window.setInterval(refresh, 4000);
+    if (!running && !followupsLive) return;
+    const timer = window.setInterval(refreshAll, 4000);
     return () => window.clearInterval(timer);
-  }, [running, refresh]);
+  }, [running, followupsLive, refreshAll]);
+
+  // The relative times are read against this clock — "in 3h 12m" in the queue, "17m ago" in the
+  // feed — so it has to move on its own while any of them is on screen.
+  useEffect(() => {
+    if (!ANALYTICS_TABS.includes((wantedTab ?? DEFAULT_VIEW) as AnalyticsTab)) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [wantedTab]);
 
   // Seed the editors once per campaign: the live refresh must not clobber in-flight edits.
   useEffect(() => {
@@ -374,7 +529,7 @@ export function Campaign({
     setBusy(label);
     try {
       await action();
-      await refresh();
+      await refreshAll();
       reload();
     } catch (e) {
       tell(String(e));
@@ -573,6 +728,40 @@ export function Campaign({
       setPicked([]);
     });
 
+  /** Sends one lead's waiting step now, through the sender the scheduler itself uses. The row
+   *  is claimed before the request goes out — the same claim the backend makes, made here
+   *  first — so a second click in the same breath has nothing to claim and the button is inert
+   *  while its own send is in flight. */
+  const sendFollowupNow = async (row: CampaignFollowupRow) => {
+    const claimed = claimRow(followups?.rows ?? [], row.lead_id);
+    if (!claimed) {
+      tell("That follow-up is already on its way");
+      return;
+    }
+    setFollowups((current) => (current ? { ...current, rows: claimed } : current));
+    setRowError(null);
+    setBusy(`send:${row.lead_id}`);
+    try {
+      await campaignFollowupSendNow(campaign.id, row.lead_id);
+      tell(`${stepLabel(row.step_position)} sent to ${row.email}`);
+    } catch (e) {
+      setRowError({ lead_id: row.lead_id, message: String(e) });
+    } finally {
+      setBusy("");
+      // The row has moved either way: on to its next step, or into the failure it reported.
+      await refreshFollowups();
+      reload();
+    }
+  };
+
+  /** Stops one lead's run through the campaign. The step is shared by the whole audience, so
+   *  what is given up here is this lead's place in it, not the step. */
+  const skipFollowup = (row: CampaignFollowupRow) =>
+    run(`skip:${row.lead_id}`, async () => {
+      await campaignLeadAction(campaign.id, row.lead_id, "skip");
+      tell(`${row.email} skipped`);
+    });
+
   const readFile = async (file: File) => {
     setBusy("read");
     try {
@@ -618,16 +807,15 @@ export function Campaign({
 
   const rows = detail?.leads ?? [];
   const bounced = detail?.bounced ?? [];
-  const funnel = detail?.funnel ?? [];
-  const subjectStats = detail?.subject_stats ?? [];
-  const recent = detail?.recent ?? [];
-  const stats = detail?.stats ?? { sent: 0, replied: 0, positive: 0, bounced: 0 };
-  const counts = detail?.counts ?? {};
+  /** Every number the page shows about the campaign. The backend counts them over leads, all
+   *  in one place, so the cards, the progress bar, the funnel and the subject lines cannot
+   *  disagree about what happened. */
+  const metrics = detail?.metrics ?? NO_METRICS;
+  const funnel = metrics.funnel ?? [];
   const total = rows.length;
-  const done = counts.done ?? 0;
-  const percent = total ? Math.round((done / total) * 100) : 0;
-  /** How many leads email 1 has already gone to — the funnel counts it as position 0. */
-  const sentFirst = funnel.find((one) => one.position === 0)?.sent ?? 0;
+  /** How many leads email 1 has already gone to: every lead written to, since the first
+   *  touch is the only step anything can have been sent to a lead by itself. */
+  const sentFirst = metrics.contacted;
   /** The campaign's own copy of the template stays editable while there is still something
    *  to send to it, kept or not. It is read at send time, so a correction reaches the leads
    *  still queued and leaves the ones already sent with what they got. A finished campaign
@@ -637,15 +825,41 @@ export function Campaign({
     .map((row) => row.next_due_at)
     .filter((at): at is string => !!at)
     .sort()[0];
-  const replyRate = stats.sent ? Math.round((stats.replied / stats.sent) * 100) : 0;
 
-  /** Analytics is a view of its own, reached from a campaign's Analytics button rather than
-   *  sitting among the setup tabs. Everything else on this page is setup. */
-  const analytics = wantedTab === "activity";
-  const tab: Tab = TABS.includes(wantedTab as Tab) ? (wantedTab as Tab) : "sequence";
+  /** The panel's rows as the filters leave them: every step, or just one, and the settled rows
+   *  only when they are asked for. The order is the backend's, which is the scheduler's. */
+  const visible = visibleFollowups(followups?.rows ?? [], { step: stepFilter, settled: showSettled });
+  const stepChoices = stepFilters(followups?.rows ?? []);
+  /** Why this campaign will not take a hand-sent follow-up, or null while it will. */
+  const sendBlocked = sendBlockedReason(status);
+
+  /** Which view is open. The shell says which one a campaign opens on — its setup when it is
+   *  being opened or created, the numbers when the Analytics button asked for them — and a
+   *  location that says nothing opens on the setup, like every other way in. */
+  const [view, setView] = useState<string>(wantedTab ?? DEFAULT_VIEW);
+
+  // The shell's own navigation wins whenever it says something different: the Analytics button,
+  // back and forward, and the setup button all arrive that way.
+  useEffect(() => {
+    if (wantedTab && wantedTab !== view) setView(wantedTab);
+  }, [wantedTab, view]);
+
+  useEffect(() => {
+    writeTabToUrl(view);
+  }, [view]);
+
+  const goTab = (next: string) => {
+    setView(next);
+    onTab(next);
+  };
+
+  /** The reading half of the page is three views of one campaign; everything else is setup. */
+  const analytics = ANALYTICS_TABS.includes(view as AnalyticsTab);
+  const analyticsTab: AnalyticsTab = analytics ? (view as AnalyticsTab) : "analytics";
+  const tab: Tab = TABS.includes(view as Tab) ? (view as Tab) : "sequence";
 
   const filtered = rows.filter((row) => {
-    const state = leadStatus(row, bounced, emails);
+    const state = audienceStatus(row, bounced, emails);
     if (statusFilter !== "All" && state !== statusFilter) return false;
     if (!query.trim()) return true;
     const needle = query.trim().toLowerCase();
@@ -653,6 +867,16 @@ export function Campaign({
       (field ?? "").toLowerCase().includes(needle)
     );
   });
+
+  /** The list tab's own reading of the same audience: narrowed by email and by what each lead
+   *  is doing, then cut to one page. It asks a different question of the rows than the setup
+   *  tab's search does, which is why it is a filter of its own rather than the same one. */
+  const listMatches = rows.filter((row) => {
+    if (listStatus !== "All" && leadStatus(row, bounced) !== listStatus) return false;
+    const needle = listQuery.trim().toLowerCase();
+    return !needle || row.email.toLowerCase().includes(needle);
+  });
+  const listRows = listMatches.slice(listPage, listPage + LEAD_PAGE);
 
   /** The rail both setup tabs share: who the campaign writes to, and what it still needs. */
   const setupAside = (
@@ -763,9 +987,7 @@ export function Campaign({
             <Badge className={`statusbadge state-${pendingStart ? "scheduled" : status}`}>
               {pendingStart ? "Scheduled" : STATUS_LABEL[status] ?? status}
             </Badge>
-            <span className="pagestatus">
-              {done} / {total} sent
-            </span>
+            <span className="pagestatus">{progressText(metrics.contacted, metrics.total)}</span>
             {saved && <span className="savedmark">Saved</span>}
           </>
         }
@@ -795,7 +1017,7 @@ export function Campaign({
                   key={one}
                   type="button"
                   className={tab === one ? "on" : undefined}
-                  onClick={() => onTab(one)}
+                  onClick={() => goTab(one)}
                 >
                   {TAB_LABEL[one]}
                 </button>
@@ -805,7 +1027,7 @@ export function Campaign({
         }
         action={
           analytics ? (
-            <Button variant="secondary" type="button" onClick={() => onTab("sequence")}>
+            <Button variant="secondary" type="button" onClick={() => goTab("sequence")}>
               Set up
             </Button>
           ) : status === "draft" ? (
@@ -842,7 +1064,7 @@ export function Campaign({
               </p>
             )}
 
-            <section className="sectioncard">
+            <section className="sectioncard sequencecard">
               <header>
                 <h2>Sequence</h2>
                 <p>What goes out, and how long it waits.</p>
@@ -879,10 +1101,12 @@ export function Campaign({
               </div>
 
               {seqTab === "first" ? (
-                <div className="seqstep on">
-                  <div className="seqstephead">
-                    <b>Email 1 · First touch</b>
-                  </div>
+                <div className="seqpane">
+                  <p className="seqhint">
+                    The email every lead gets first. Follow-ups answer it in the same thread.
+                  </p>
+                  <div className="seqfield">
+                    <span className="seqlabel">Template</span>
                         <Select
                           className="wide"
                           label="Copy a template into email 1"
@@ -902,6 +1126,9 @@ export function Campaign({
                             }
                           }}
                         />
+                  </div>
+                  <div className="seqfield">
+                    <span className="seqlabel">Subject</span>
                         <div className="subjectlines">
                           {subjects.map((line, index) => (
                             <div className="subjectline" key={index}>
@@ -948,6 +1175,9 @@ export function Campaign({
                             </small>
                           )}
                         </div>
+                  </div>
+                  <div className="seqfield">
+                    <span className="seqlabel">Message</span>
                         <div className="varfield">
                           <textarea
                             ref={firstBody}
@@ -994,15 +1224,21 @@ export function Campaign({
                             queued gets this version.
                           </small>
                         )}
+                  </div>
                 </div>
               ) : (
-                <>
+                <div className="seqpane">
                   <div className="timeline">
                     {steps.length === 0 && (
-                      <p className="muted">
-                        No follow-ups yet. Add one and it goes out in the first email's thread once the wait is
-                        up.
-                      </p>
+                      <div className="seqempty">
+                        <p>
+                          No follow-ups yet. One goes out in the first email's thread once the wait is up.
+                        </p>
+                        <Button variant="ghost" type="button" onClick={addStep}>
+                          <Plus />
+                          Add follow-up
+                        </Button>
+                      </div>
                     )}
                     {steps.map((step, index) => {
                       const stepSent = funnel.find((one) => one.position === index + 1)?.sent ?? 0;
@@ -1092,7 +1328,7 @@ export function Campaign({
                       </label>
                     </div>
                   )}
-                </>
+                </div>
               )}
             </section>
           </div>
@@ -1189,128 +1425,227 @@ export function Campaign({
       )}
 
       {analytics && (
-        <div className="stack">
-          <div className="metrics">
-            <article>
-              <small>Sent</small>
-              <strong>{stats.sent}</strong>
-            </article>
-            <article>
-              <small>Replied</small>
-              <strong>{stats.replied}</strong>
-              <em>{replyRate}%</em>
-            </article>
-            <article>
-              <small>Positive</small>
-              <strong>{stats.positive}</strong>
-            </article>
-            <article>
-              <small>Failed / bounced</small>
-              <strong>{stats.bounced}</strong>
-            </article>
+        <>
+          <div className="tabbar" role="tablist" aria-label="Campaign">
+            {ANALYTICS_TABS.map((one) => (
+              <button
+                key={one}
+                type="button"
+                role="tab"
+                aria-selected={analyticsTab === one}
+                className={`tabbaritem${analyticsTab === one ? " on" : ""}`}
+                onClick={() => goTab(one)}
+              >
+                {ANALYTICS_LABEL[one]}
+              </button>
+            ))}
           </div>
 
+          {analyticsTab === "analytics" && (
+            <CampaignAnalytics campaignId={campaign.id} metrics={metrics} />
+          )}
+
+          {analyticsTab === "activity" && (
+            <CampaignActivity campaignId={campaign.id} onOpenThread={onOpenThread} />
+          )}
+
+          {analyticsTab === "list" && (
+            <div className="stack">
+              {/* What goes out next, in one line. The time is the one stored when the step
+                  before it was sent — never worked out from the delay again — so the pace, the
+                  start and the daily cap can all push it later than it reads. */}
+              <section className="sectioncard nextup">
+                {followups?.next ? (
+                  <p>
+                    Next: <b>{stepLabel(followups.next.step_position)}</b> →{" "}
+                    <b>{followups.next.email}</b> · <b>{whenAt(followups.next.scheduled_at)}</b>{" "}
+                    <span className="muted">({dueText(followups.next, clock, pace)})</span>
+                  </p>
+                ) : (
+                  <p className="muted">Nothing scheduled.</p>
+                )}
+              </section>
+
           <section className="sectioncard">
-            <div className="progressbar" role="img" aria-label={`${percent}% sent`}>
-              <em style={{ width: `${percent}%` }} />
+            <header>
+              <h2>Upcoming follow-ups</h2>
+              {/* The pace is the answer to "why is the second one still waiting" — the campaign
+                  sends one email at a time, so a row behind another waits its turn. */}
+              <p>
+                Scheduled sends, one every {campaign.interval_minutes || 1}m. Send any of them
+                now.
+              </p>
+            </header>
+
+            <div className="leadfilters">
+              {stepChoices.map((choice) => (
+                <FilterChip
+                  key={choice}
+                  label={choice === "All" ? "All steps" : stepLabel(Number(choice))}
+                  active={stepFilter === choice}
+                  onClick={() => setStepFilter(choice)}
+                />
+              ))}
+              {/* What is still to go out is the point of the panel, so the rows that have
+                  settled — sent, skipped — are one chip away rather than in the way. */}
+              <FilterChip
+                label="Sent & skipped"
+                active={showSettled}
+                onClick={() => setShowSettled(!showSettled)}
+              />
             </div>
-            <p className="muted">
-              {done} / {total} sent
-              {nextDue ? ` · next send in ${away(nextDue)}` : ""}
-            </p>
+
+            <div className="followtable">
+              <div className="followhead">
+                <span>Lead email</span>
+                <span>Step</span>
+                <span>Subject</span>
+                <span>Scheduled for</span>
+                <span>Status</span>
+                <span />
+              </div>
+              {visible.map((row) => {
+                const state = followupStatus(row);
+                // The failure the row just came back with outranks the one stored on it.
+                const error = rowError?.lead_id === row.lead_id ? rowError.message : row.last_error;
+                return (
+                  <div className="followrow" key={row.lead_id}>
+                    <span className="truncate">{row.email}</span>
+                    <span>{stepLabel(row.step_position)}</span>
+                    {/* What this step will go out with: a follow-up wears the first email's
+                        subject with one `Re:`, which is what puts it in the same conversation
+                        at the other end. */}
+                    <span className="truncate">{row.subject || "—"}</span>
+                    <span className="followdue">
+                      {whenAt(row.scheduled_at)}
+                      <small>{dueText(row, clock, pace)}</small>
+                    </span>
+                    <span className="followstate">
+                      <span className={`chipstatus ${state.toLowerCase()}`}>{state}</span>
+                      {error && <small className="followerror">{error}</small>}
+                    </span>
+                    <span className="followactions">
+                      {canSend(row) && (
+                        <>
+                          <Tooltip
+                            label={sendBlocked ?? "Send this one now, without waiting for its turn"}
+                          >
+                            <span className="launchwrap">
+                              <Button
+                                variant="ghost"
+                                type="button"
+                                disabled={!!sendBlocked || busy === `send:${row.lead_id}`}
+                                onClick={() => setConfirmingSend(row)}
+                              >
+                                Send now
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          <Button
+                            variant="ghost"
+                            type="button"
+                            disabled={!!busy}
+                            onClick={() => skipFollowup(row)}
+                          >
+                            Skip
+                          </Button>
+                        </>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+              {visible.length === 0 && (
+                <p className="muted">
+                  {noFollowupsText({ step: stepFilter, settled: showSettled })}
+                </p>
+              )}
+            </div>
           </section>
 
-          {subjectStats.length > 1 && (
-            <section className="sectioncard">
-              <header>
-                <h2>Subject lines</h2>
-                <p>How each line is doing. Every reply is credited to the line its lead was given.</p>
-              </header>
-              {subjectStats.map((stat) => (
-                <div className="funnelrow" key={stat.position}>
-                  <span className="funnelname">
-                    {String.fromCharCode(65 + stat.position)} · {stat.subject || "—"}
-                  </span>
-                  <span className="funnelbar">
-                    <em
-                      style={{
-                        width: `${(stat.sent / Math.max(1, ...subjectStats.map((one) => one.sent))) * 100}%`,
-                      }}
-                    />
-                  </span>
-                  <span className="funnelcount">
-                    {stat.leads} leads · {stat.sent} sent · {stat.replied} replied
-                    {stat.sent ? ` (${Math.round((stat.replied / stat.sent) * 100)}%)` : ""}
-                  </span>
-                </div>
-              ))}
-            </section>
-          )}
-
-          {recent.length === 0 ? (
-            <section className="sectioncard">
-              <div className="blank">
-                <BarChart3 size={20} />
-                <p>
-                  <b>No activity yet</b>
-                </p>
-                <small>Launch the campaign to start sending.</small>
+          <section className="sectioncard">
+            <header>
+              <h2>Leads</h2>
+              <p>Everyone enrolled, and where each of them has got to.</p>
+            </header>
+            <div className="leadfilters">
+              <Input
+                placeholder="Search leads…"
+                value={listQuery}
+                onChange={(event) => {
+                  setListQuery(event.target.value);
+                  setListPage(0);
+                }}
+              />
+              <Select
+                label="Status filter"
+                prefix="Status:"
+                value={listStatus}
+                options={[
+                  { value: "All", label: "All" },
+                  ...LEAD_STATUSES.map((one) => ({ value: one, label: one })),
+                ]}
+                onChange={(value) => {
+                  setListStatus(value);
+                  setListPage(0);
+                }}
+              />
+            </div>
+            <div className="leadtable listtable">
+              <div className="leadhead">
+                <span>Lead email</span>
+                <span>Variant</span>
+                <span>Current step</span>
+                <span>Status</span>
+                <span>Last sent</span>
+                <span>Next send</span>
               </div>
-            </section>
-          ) : (
-            <>
-              <section className="sectioncard">
-                <header>
-                  <h2>Step funnel</h2>
-                  <p>What each step sent, earned, and still has waiting.</p>
-                </header>
-                {funnel.map((row) => {
-                  const widest = Math.max(1, ...funnel.map((one) => one.sent));
-                  return (
-                    <div className="funnelrow" key={row.position}>
-                      <span className="funnelname">
-                        {row.position === 0 ? "Email 1" : `Follow-up ${row.position}`}
+              {listRows.map((row) => {
+                const state = leadStatus(row, bounced);
+                return (
+                  <div className="leadrowline" key={row.lead_id}>
+                    <span className="truncate">{row.email}</span>
+                    <span className="truncate">{variantLabel(row.subject_variant, subjects)}</span>
+                    <span>{stepLabel(row.step_position ?? 0)}</span>
+                    <span>
+                      <span className={`chipstatus ${state.toLowerCase().replace(" ", "-")}`}>
+                        {state}
                       </span>
-                      <span className="funnelbar">
-                        <em style={{ width: `${(row.sent / widest) * 100}%` }} />
-                      </span>
-                      <span className="funnelcount">
-                        {row.sent} sent · {row.replied} replied · {row.pending} waiting
-                      </span>
-                    </div>
-                  );
-                })}
-              </section>
-
-              <section className="sectioncard">
-                <header>
-                  <h2>Recent activity</h2>
-                </header>
-                <div className="feedrows">
-                  {recent.slice(0, 20).map((event: CampaignEvent, index) => (
-                    <button
-                      type="button"
-                      className="feedrow"
-                      key={`${event.kind}-${event.lead_id}-${index}`}
-                      disabled={!event.message_id}
-                      onClick={() => event.message_id && onOpenThread(event.message_id)}
-                    >
-                      <span className="feedname">{event.name || event.lead_id}</span>
-                      <span className={`chipchip ${event.kind}`}>
-                        {event.kind === "sent" && event.step !== null && event.step !== undefined
-                          ? event.step === 0
-                            ? "Sent"
-                            : `Follow-up ${event.step}`
-                          : EVENT_LABEL[event.kind] ?? event.kind}
-                      </span>
-                      <span className="feedtime">{when(event.at)}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            </>
+                    </span>
+                    <span className="truncate">{whenAt(row.sent_at)}</span>
+                    <span className="truncate">
+                      {row.next_due_at ? (
+                        <>
+                          {whenAt(row.next_due_at)}
+                          <small className="muted">{away(row.next_due_at)}</small>
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+              {listRows.length === 0 && (
+                <p className="muted">
+                  {listQuery.trim() || listStatus !== "All"
+                    ? `No leads here match${listQuery.trim() ? ` “${listQuery.trim()}”` : ""}${
+                        listStatus !== "All" ? ` with status ${listStatus}` : ""
+                      }.`
+                    : "No leads have been enrolled yet."}
+                </p>
+              )}
+            </div>
+            <Pager
+              offset={listPage}
+              size={LEAD_PAGE}
+              total={listMatches.length}
+              onPage={setListPage}
+            />
+          </section>
+            </div>
           )}
-        </div>
+        </>
       )}
 
       {!analytics && tab === "leads" && (
@@ -1372,8 +1707,8 @@ export function Campaign({
                   <span className="truncate">{row.email}</span>
                   <span className="truncate">{row.company || "—"}</span>
                   <span>
-                    <span className={`chipstatus ${leadStatus(row, bounced, emails).toLowerCase()}`}>
-                      {leadStatus(row, bounced, emails)}
+                    <span className={`chipstatus ${audienceStatus(row, bounced, emails).toLowerCase()}`}>
+                      {audienceStatus(row, bounced, emails)}
                     </span>
                   </span>
                   <span>
@@ -1530,6 +1865,36 @@ export function Campaign({
                 disabled={busy === "launch" || (schedMode === "later" && !schedDate)}
               >
                 {schedMode === "later" ? "Schedule campaign" : "Launch campaign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sending by hand goes out immediately and cannot be called back, so it is asked for
+          rather than done on the click — the same overlay grammar the launch uses. */}
+      {confirmingSend && (
+        <div className="confirm" onMouseDown={() => setConfirmingSend(null)}>
+          <div className="confirm-card" onMouseDown={(event) => event.stopPropagation()}>
+            <h3>Send now?</h3>
+            <p>
+              Send {stepLabel(confirmingSend.step_position)} to {confirmingSend.email} now? It
+              goes out immediately instead of waiting for its turn, and this cannot be taken back.
+            </p>
+            <div className="confirm-actions">
+              <button type="button" onClick={() => setConfirmingSend(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  const row = confirmingSend;
+                  setConfirmingSend(null);
+                  sendFollowupNow(row);
+                }}
+              >
+                Send now
               </button>
             </div>
           </div>

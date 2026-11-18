@@ -139,9 +139,9 @@
 
 .setupcols {
   display: grid;
-  grid-template-columns: minmax(0, 720px) 280px;
+  grid-template-columns: minmax(0, 760px) 300px;
   align-items: start;
-  gap: var(--s5);
+  gap: var(--s6);
 }
 
 .setupmain,
@@ -169,7 +169,7 @@
 }
 
 .locknote {
-  padding: var(--s3);
+  padding: var(--s4);
   border: 1px solid var(--border);
   border-radius: var(--r-input);
   background: var(--bg-input);
@@ -192,7 +192,7 @@
 .sectioncard > header {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--s1);
 }
 
 .sectioncard > header h2 {
@@ -252,6 +252,142 @@
 
 .link:hover {
   color: var(--text);
+}
+
+/* ---------- The setup tab: the sequence pane ---------- */
+
+/* The sequence card lays itself out rather than letting the card's own padding do it. The pane
+   strip spans the card as a header bar and the body under it owns the padding, so the editor
+   is the card's content instead of a card inside a card, and the run of fields reads as one
+   column of labelled groups. */
+.sequencecard {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.sequencecard > header {
+  padding: var(--s5) var(--s5) var(--s4);
+}
+
+/* The strip: the two panes along it, the one action at the far end, a hairline under the lot. */
+.sequencecard .composertabs {
+  gap: var(--s2);
+  height: 44px;
+  padding: 0 var(--s5);
+  border-bottom: 1px solid var(--border);
+}
+
+.sequencecard .composertab {
+  padding: 0 var(--s3);
+}
+
+/* Adding the next thing is one control, and it sits at the end of the strip. */
+.sequencecard .composertabadd {
+  margin-left: auto;
+}
+
+/* A pane's body: one column, and enough air between the groups that the message, its subject
+   and its body do not read as a single undifferentiated stack. */
+.seqpane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  padding: var(--s5);
+}
+
+/* One labelled group inside a pane. */
+.seqfield {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* The group's name, wearing what the table's columns and the feed's day headings wear. */
+.seqlabel {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* A control that belongs to its field rather than stretching the width of the pane. */
+.seqfield > .wide {
+  max-width: 320px;
+}
+
+/* A settings card's rows, one on the next. The sequence card spaces itself, so it is left out. */
+.setupmain > .sectioncard:not(.sequencecard) {
+  gap: var(--s4);
+  padding: var(--s5);
+}
+
+/* Nothing here yet, and the way to change that, in one box. */
+.seqempty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s5);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-card);
+  color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+/* The steps: cards that stack, with the wait between two of them marked on the rail. */
+.sequencecard .timeline {
+  gap: var(--s5);
+}
+
+.sequencecard .tconnect {
+  margin-bottom: var(--s3);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* The dot heads the step it belongs to rather than the card under it. */
+.sequencecard .tdot {
+  top: 5px;
+}
+
+.sequencecard .fufcard {
+  gap: var(--s3);
+  padding: var(--s4);
+}
+
+/* A step's subject is one line of control, the same height as the wait it is set beside. */
+.sequencecard .fufsubject,
+.sequencecard .fufdelay input {
+  height: var(--h-control);
+}
+
+.sequencecard .fufsubject {
+  padding: 0 var(--s3);
+}
+
+/* The variable buttons carry a chip wider than an icon button is: let the button take the
+   chip's width rather than spilling over the tool beside it. */
+.sequencecard .composerformat .btn-icon:has(.composervar) {
+  width: auto;
+  padding: 0 var(--s2);
+}
+
+/* The stop rules: a strip that opens into a panel of its own rather than a line of loose
+   checkboxes under the last step. */
+.sequencecard .ruleline {
+  padding-top: var(--s3);
+}
+
+.sequencecard .fufrules {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-input);
+  background: var(--bg-input);
 }
 
 /* ---------- The dropzone ---------- */
@@ -585,41 +721,107 @@
   background: var(--bg-hover);
 }
 
-.feedrow:disabled {
-  cursor: default;
-}
-
-.feedname {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: var(--fs-13);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .feedtime {
   color: var(--text-faint);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
 
-.chipchip {
-  flex: none;
-  padding: 2px var(--s2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-chip);
+/* What the campaign does next, in one line: a sentence between the progress bar and the
+   tables rather than a card with a heading of its own. */
+.nextup {
+  padding-top: var(--s3);
+  padding-bottom: var(--s3);
+}
+
+.nextup p {
   color: var(--text-muted);
+  font-size: var(--fs-13);
+}
+
+.nextup b {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* ---------- Upcoming follow-ups ---------- */
+
+/* The panel's table, wearing the leads table's geometry: a hairline a row, one line of air. */
+.followtable {
+  display: flex;
+  flex-direction: column;
+}
+
+.followhead,
+.followrow {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1.4fr) 90px minmax(0, 1.2fr) minmax(0, 1fr)
+    minmax(0, 1.1fr) 180px;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.followhead {
+  height: 36px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.followrow {
+  /* A minimum rather than a height: a failure keeps its row and wraps inside it. */
+  min-height: 44px;
+  padding: var(--s2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.followrow:last-child {
+  border-bottom: 0;
+}
+
+.followrow:hover {
+  background: var(--bg-hover);
+}
+
+/* The stored due time and how far off it is. No tint: a row past its time is waiting its turn,
+   and warning about it is exactly the false alarm this panel used to raise. */
+.followdue {
+  white-space: nowrap;
+}
+
+/* The status, and under it why the row is where it is. */
+.followstate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.followerror {
+  color: var(--danger);
   font-size: var(--fs-xs);
 }
 
-.chipchip.replied {
-  color: var(--text);
+.followactions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
 }
 
-.chipchip.bounced {
-  color: var(--danger);
+/* The two states of a follow-up a hand can still do something about. */
+.chipstatus.sending::before {
+  background: var(--text-muted);
+}
+
+.chipstatus.failed::before {
+  background: var(--danger);
 }
 
 /* ---------- The leads table ---------- */
@@ -796,4 +998,195 @@
   align-items: center;
   justify-content: flex-end;
   gap: var(--s2);
+}
+
+/* ---------- The campaign's three views: Analytics, Activity, List ---------- */
+
+/* An underline bar rather than the pill the setup tabs wear: these three are one campaign read
+   three ways, not three things to go and do. */
+.tabbar {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s5);
+  padding: 0 var(--s1);
+  border-bottom: 1px solid var(--border);
+}
+
+.tabbaritem {
+  position: relative;
+  padding: var(--s3) 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-md);
+  cursor: pointer;
+  transition: color var(--motion) var(--ease-out);
+}
+
+.tabbaritem:hover,
+.tabbaritem.on {
+  color: var(--text);
+}
+
+/* The rule under the open one, drawn over the bar's own hairline. */
+.tabbaritem.on::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--text);
+  content: "";
+}
+
+.tabbaritem:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* A number's quiet footnote: the emails behind the leads, the audience behind a rate. */
+.statnote {
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+/* A card heading that carries a control, the same shape the lead filters already give it. */
+.sectioncard > header:has(.segmented) {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+/* ---------- The activity feed ---------- */
+
+.feedgroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.feedday {
+  margin: var(--s2) 0 0;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* A row is a button when it opens the conversation it is about, and a plain row when the
+   thing it describes has no conversation to open. */
+button.feedrow {
+  cursor: pointer;
+}
+
+div.feedrow {
+  cursor: default;
+}
+
+.feeddot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.feeddot.good {
+  background: var(--success);
+}
+
+.feeddot.bad {
+  background: var(--danger);
+}
+
+.feedtext {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text);
+  font-size: var(--fs-13);
+}
+
+.feednote {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedtime {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  text-align: right;
+}
+
+.feedtime small {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* The stored instant, and under it how far off it is. The queue's exact time owns the line;
+   the distance is the gloss on it. */
+.followdue small {
+  display: block;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* ---------- The list's own table: the audience as a queue ---------- */
+
+.listtable .leadhead,
+.listtable .leadrowline {
+  grid-template-columns:
+    minmax(0, 1.6fr) minmax(0, 1.2fr) 110px 120px
+    minmax(0, 1fr) minmax(0, 1.1fr);
+}
+
+.listtable .leadrowline {
+  height: auto;
+  min-height: 44px;
+  padding: var(--s2) 0;
+}
+
+/* A cell carrying a time and its distance reads as two lines, the second quieter. */
+.listtable .leadrowline small {
+  display: block;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+/* The statuses the list invented, beside the ones the queue already draws. */
+.chipstatus.queued::before {
+  background: var(--text-faint);
+}
+
+.chipstatus.in-sequence::before {
+  background: var(--text-muted);
+}
+
+.chipstatus.finished::before {
+  background: var(--text);
+}
+
+/* ---------- Paging ---------- */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
+}
+
+.pager .muted {
+  margin-right: auto;
+  font-size: var(--fs-sm);
 }
