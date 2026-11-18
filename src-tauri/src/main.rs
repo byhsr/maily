@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::sync::Semaphore;
@@ -453,8 +454,20 @@ struct Mail<'a> {
     text: &'a str,
     /// The rendered HTML, or `None` for a plain campaign template.
     html: Option<&'a str>,
-    /// Provider threading hint — a Gmail thread id, or an RFC Message-ID for Microsoft.
+    /// Gmail's own threading hint: the thread the message is filed in. Google-internal — it
+    /// never travels in the message, so on its own it does not make a reply to anyone else.
     thread: Option<&'a str>,
+    /// The RFC Message-ID this message answers. This is the one that threads it: written as
+    /// `In-Reply-To`, and as the last link of `References`.
+    reference: Option<&'a str>,
+    /// Every Message-ID the conversation has been through, oldest first, space-separated. A
+    /// client rebuilds the whole thread from the list and still matches the messages it kept
+    /// when one in the middle is missing. Left unset, the parent stands in as the chain.
+    references: Option<&'a str>,
+    /// The Message-ID this message goes out with. One we choose rather than one we hope to read
+    /// back, so the email after this one has something to answer even when the provider will not
+    /// say what it sent — which is the difference between a follow-up and a second email.
+    message_id: Option<&'a str>,
 }
 
 #[tauri::command]
@@ -1180,6 +1193,19 @@ async fn save_steps(
             .map_err(err)?;
     }
     tx.commit().await.map_err(err)?;
+    // A step added to a campaign whose leads had already run out is only half a change until
+    // those leads are on it: without this the step shows in the funnel and in no one's
+    // schedule, and nothing will ever pick it up.
+    let reopened = reopen_finished(&state.db, &campaign_id).await?;
+    if reopened > 0 {
+        log(
+            &state.db,
+            "info",
+            "campaign_step_added",
+            &format!("{reopened} finished leads took on the new step"),
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -1215,6 +1241,355 @@ async fn list_campaigns(state: State<'_, AppState>) -> Result<Vec<Value>> {
                 .collect()
         })
 }
+/// A percentage, as a whole number, of a part of a whole that may be nothing. The guard is the
+/// point: an audience nobody has written to yet has no reply rate, and showing it as NaN or as
+/// Infinity is how a dashboard ends up lying about a campaign that has not started.
+fn rate(part: i64, whole: i64) -> i64 {
+    if whole <= 0 {
+        0
+    } else {
+        (part * 100) / whole
+    }
+}
+
+/// Every number the campaign page shows about itself, counted over leads rather than over rows,
+/// and counted in SQL. The alternative — fetching every send and every answer and adding them up
+/// here — is how a campaign two emails into each of two leads came to say "4 / 2 sent" beside a
+/// Sent card of 4: the header was counting leads whose sequence had finished and the card was
+/// counting emails, and neither was answering the question.
+///
+/// Contacted is a lead with a sent email to its name; replies, positives, bounces and
+/// unsubscribes are leads too, so a lead who answers twice answers once. Every rate is over the
+/// leads that were written to, never over the emails sent.
+async fn campaign_metrics(db: &SqlitePool, campaign_id: &str) -> Result<Value> {
+    // The count of leads behind an answer, or behind a bounce: the two differ only in the sign
+    // of the test, so one builder writes both.
+    let answered = |bounce: bool| {
+        let test = not_a_bounce_sql();
+        let test = if bounce { format!("NOT ({test})") } else { test };
+        format!(
+            "SELECT count(DISTINCT cl.lead_id) FROM campaign_leads cl \
+             JOIN inbox_messages m ON m.thread_id=cl.thread_ref \
+             WHERE cl.campaign_id=? AND m.ours=0 AND m.deleted_at IS NULL AND {test}"
+        )
+    };
+    let count = |sql: &str| {
+        let sql = sql.to_string();
+        let campaign_id = campaign_id.to_string();
+        let db = db.clone();
+        async move { sqlx::query_scalar::<_, i64>(&sql).bind(campaign_id).fetch_one(&db).await.map_err(err) }
+    };
+
+    let total = count("SELECT count(*) FROM campaign_leads WHERE campaign_id=?").await?;
+    let contacted = count("SELECT count(DISTINCT lead_id) FROM send_logs WHERE campaign_id=? AND status='sent'").await?;
+    let emails_sent = count("SELECT count(*) FROM send_logs WHERE campaign_id=? AND status='sent'").await?;
+    let replied = count(&answered(false)).await?;
+    let bounced = count(&answered(true)).await?;
+    let positive = count(&format!("{} AND m.intent='interested'", answered(false))).await?;
+    let unsubscribed = count(
+        "SELECT count(DISTINCT cl.lead_id) FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id \
+         WHERE cl.campaign_id=? AND l.email IN (SELECT email FROM suppressions)",
+    )
+    .await?;
+    let finished = count("SELECT count(*) FROM campaign_leads WHERE campaign_id=? AND state='done'").await?;
+    // How long the sequence is: the campaign's own first email, and every follow-up it has on.
+    let steps: i64 = sqlx::query_scalar("SELECT 1 + count(*) FROM sequence_steps WHERE campaign_id=? AND enabled=1")
+        .bind(campaign_id)
+        .fetch_one(db)
+        .await
+        .map_err(err)?;
+    // A lead that received every step it has. Read against the sequence as it is now, so adding
+    // a step lowers this until the leads come round to it, which is what "every step" means.
+    let completed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM campaign_leads cl WHERE cl.campaign_id=? AND \
+         (SELECT count(DISTINCT s.step_position) FROM send_logs s WHERE s.campaign_id=cl.campaign_id \
+          AND s.lead_id=cl.lead_id AND s.status='sent') >= ?",
+    )
+    .bind(campaign_id)
+    .bind(steps)
+    .fetch_one(db)
+    .await
+    .map_err(err)?;
+
+    // The wait between the email a lead answered and the answer. Paired in SQL, medianed here:
+    // SQLite has no median, and it is a median over one number per answered lead rather than a
+    // count of anything.
+    let pairs = sqlx::query(&format!(
+        "SELECT f.at AS replied_at,(SELECT max(s.created_at) FROM send_logs s \
+         WHERE s.campaign_id=? AND s.lead_id=f.lead_id AND s.created_at<=f.at) AS sent_at \
+         FROM (SELECT cl.lead_id,min(m.received_at) AS at FROM campaign_leads cl \
+         JOIN inbox_messages m ON m.thread_id=cl.thread_ref WHERE cl.campaign_id=? AND m.ours=0 \
+         AND m.deleted_at IS NULL AND {} GROUP BY cl.lead_id) f",
+        not_a_bounce_sql()
+    ))
+    .bind(campaign_id)
+    .bind(campaign_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    let mut waits: Vec<i64> = pairs
+        .iter()
+        .filter_map(|row| {
+            let replied_at = moment(&row.get::<Option<String>, _>("replied_at")?)?;
+            let sent_at = moment(&row.get::<Option<String>, _>("sent_at")?)?;
+            let minutes = (replied_at - sent_at).num_minutes();
+            (minutes >= 0).then_some(minutes)
+        })
+        .collect();
+    waits.sort_unstable();
+    let median = match waits.len() {
+        0 => None,
+        len if len % 2 == 1 => Some(waits[len / 2]),
+        len => Some((waits[len / 2 - 1] + waits[len / 2]) / 2),
+    };
+
+    // The funnel, per step: how many leads got that far, how many emails went out at it, how
+    // many of the answers it earned, and how many leads are waiting on it. A reply belongs to
+    // the last step that went out before it.
+    let top: i64 = sqlx::query_scalar(
+        "SELECT max(COALESCE((SELECT max(position) FROM sequence_steps WHERE campaign_id=? AND enabled=1),0),COALESCE((SELECT max(step_position) FROM send_logs WHERE campaign_id=?),0))",
+    )
+    .bind(campaign_id)
+    .bind(campaign_id)
+    .fetch_one(db)
+    .await
+    .map_err(err)?;
+    let mut funnel: Vec<Value> = Vec::new();
+    for position in 0..=top {
+        let reached = count(&format!(
+            "SELECT count(DISTINCT lead_id) FROM send_logs WHERE campaign_id=? AND status='sent' AND step_position>={position}"
+        ))
+        .await?;
+        let sent = count(&format!(
+            "SELECT count(*) FROM send_logs WHERE campaign_id=? AND status='sent' AND step_position={position}"
+        ))
+        .await?;
+        let replied_here = count(&format!(
+            "SELECT count(DISTINCT cl.lead_id) FROM campaign_leads cl \
+             JOIN inbox_messages m ON m.thread_id=cl.thread_ref WHERE cl.campaign_id=? AND m.ours=0 \
+             AND m.deleted_at IS NULL AND {} AND (SELECT max(s.step_position) FROM send_logs s \
+             WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id AND s.created_at<=m.received_at)={position}",
+            not_a_bounce_sql()
+        ))
+        .await?;
+        let waiting = count(&format!(
+            "SELECT count(DISTINCT lead_id) FROM campaign_leads WHERE campaign_id=? AND state='queued' AND step_position={position}"
+        ))
+        .await?;
+        funnel.push(json!({
+            "position": position,
+            "leads": reached,
+            "sent": sent,
+            "replied": replied_here,
+            "waiting": waiting,
+        }));
+    }
+
+    // The subject lines, each credited with the leads it was given: a reply belongs to the line
+    // its lead was assigned rather than to whichever line happened to go out first.
+    let subjects: Vec<String> = sqlx::query_scalar("SELECT subject FROM campaign_subjects WHERE campaign_id=? ORDER BY position")
+        .bind(campaign_id)
+        .fetch_all(db)
+        .await
+        .map_err(err)?;
+    let mut subject_stats: Vec<Value> = Vec::new();
+    if subjects.len() > 1 {
+        for (position, line) in subjects.iter().enumerate() {
+            let position = position as i64;
+            let leads = count(&format!(
+                "SELECT count(*) FROM campaign_leads WHERE campaign_id=? AND subject_variant={position}"
+            ))
+            .await?;
+            let contacted_line = count(&format!(
+                "SELECT count(DISTINCT s.lead_id) FROM send_logs s JOIN campaign_leads cl \
+                 ON cl.campaign_id=s.campaign_id AND cl.lead_id=s.lead_id \
+                 WHERE s.campaign_id=? AND s.status='sent' AND cl.subject_variant={position}"
+            ))
+            .await?;
+            let replied_line = count(&format!(
+                "SELECT count(DISTINCT cl.lead_id) FROM campaign_leads cl \
+                 JOIN inbox_messages m ON m.thread_id=cl.thread_ref WHERE cl.campaign_id=? AND m.ours=0 \
+                 AND m.deleted_at IS NULL AND cl.subject_variant={position} AND {}",
+                not_a_bounce_sql()
+            ))
+            .await?;
+            subject_stats.push(json!({
+                "position": position,
+                "subject": line,
+                "leads": leads,
+                "contacted": contacted_line,
+                "replied": replied_line,
+                "rate": rate(replied_line, contacted_line),
+            }));
+        }
+    }
+
+    // The ids, for the lead rows that say "bounced" without re-running the classifier.
+    let bounced_leads: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT cl.lead_id FROM campaign_leads cl JOIN inbox_messages m \
+         ON m.thread_id=cl.thread_ref WHERE cl.campaign_id=? AND m.ours=0 AND m.deleted_at IS NULL \
+         AND NOT ({})",
+        not_a_bounce_sql()
+    ))
+    .bind(campaign_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+
+    Ok(json!({
+        "total": total,
+        "contacted": contacted,
+        "emails_sent": emails_sent,
+        "replied": replied,
+        "reply_rate": rate(replied, contacted),
+        "positive": positive,
+        "bounced": bounced,
+        "unsubscribed": unsubscribed,
+        "bounce_rate": rate(bounced, contacted),
+        "unsubscribe_rate": rate(unsubscribed, contacted),
+        // Round to one decimal so the page never prints a float's whole tail.
+        "emails_per_reply": (replied > 0).then(|| ((emails_sent as f64 / replied as f64) * 10.0).round() / 10.0),
+        "median_reply_minutes": median,
+        "finished": finished,
+        "in_sequence": total - finished,
+        "completed_sequence": completed,
+        "steps": steps,
+        "completion_rate": rate(completed, total),
+        "funnel": funnel,
+        "subject_stats": subject_stats,
+        "bounced_leads": bounced_leads,
+    }))
+}
+
+/// Sends and replies per day, oldest first, for the chart. Days are UTC, like the counters a
+/// campaign's daily cap is kept in, so a bar is never half in one day and half in another. Every
+/// day in the range is present, including the quiet ones: a gap in a line reads as missing data.
+async fn campaign_day_series(db: &SqlitePool, campaign_id: &str, days: i64) -> Result<Vec<Value>> {
+    let today = Utc::now().date_naive();
+    let first = today - chrono::Duration::days(days - 1);
+    let since = format!("{first}T00:00:00");
+    let sent = sqlx::query(
+        "SELECT substr(created_at,1,10) AS day,count(*) AS n FROM send_logs \
+         WHERE campaign_id=? AND status='sent' AND created_at>=? GROUP BY day",
+    )
+    .bind(campaign_id)
+    .bind(&since)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    let answers = sqlx::query(&format!(
+        "SELECT substr(m.received_at,1,10) AS day,count(DISTINCT cl.lead_id) AS n, \
+         sum(CASE WHEN m.intent='interested' THEN 1 ELSE 0 END) AS positive \
+         FROM campaign_leads cl JOIN inbox_messages m ON m.thread_id=cl.thread_ref \
+         WHERE cl.campaign_id=? AND m.ours=0 AND m.deleted_at IS NULL AND m.received_at>=? AND {} \
+         GROUP BY day",
+        not_a_bounce_sql()
+    ))
+    .bind(campaign_id)
+    .bind(&since)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    let lookup = |rows: &[sqlx::sqlite::SqliteRow], column: &str| {
+        rows.iter()
+            .map(|row| (row.get::<String, _>("day"), row.get::<i64, _>(column)))
+            .collect::<std::collections::HashMap<_, _>>()
+    };
+    let sent_by_day = lookup(&sent, "n");
+    let replied_by_day = lookup(&answers, "n");
+    let positive_by_day = lookup(&answers, "positive");
+    let mut series: Vec<Value> = Vec::new();
+    for offset in 0..days {
+        let day = first + chrono::Duration::days(offset);
+        let key = day.format("%Y-%m-%d").to_string();
+        series.push(json!({
+            "key": key,
+            "label": day.format("%b %-d").to_string(),
+            "sent": sent_by_day.get(&key).copied().unwrap_or(0),
+            "replied": replied_by_day.get(&key).copied().unwrap_or(0),
+            "positive": positive_by_day.get(&key).copied().unwrap_or(0),
+            "failed": 0,
+        }));
+    }
+    Ok(series)
+}
+
+/// The sizes a page of history comes in.
+const ACTIVITY_PAGE: usize = 50;
+
+/// One campaign's history, newest first, a page at a time. The feed groups these by day, so this
+/// hands back a flat list of a page and the day headings are the client's business.
+#[tauri::command]
+async fn campaign_activity(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    kind: Option<String>,
+    offset: Option<i64>,
+) -> Result<Value> {
+    let offset = offset.unwrap_or(0).max(0);
+    // One type, or several separated by commas for a filter that covers more than one — the
+    // campaign pausing and resuming is one story told by two types.
+    let kinds: Vec<String> = kind
+        .as_deref()
+        .map(|value| {
+            value
+                .split(',')
+                .map(|one| one.trim().to_string())
+                .filter(|one| !one.is_empty() && one != "all")
+                .collect()
+        })
+        .unwrap_or_default();
+    let filter = if kinds.is_empty() {
+        String::new()
+    } else {
+        format!(" AND ({})", vec!["e.event_type=?"; kinds.len()].join(" OR "))
+    };
+    // One more than a page, so the caller knows whether to offer another without counting.
+    let sql = format!(
+        "SELECT e.id,e.event_type,e.created_at,e.lead_id,e.step_position,e.detail,e.metadata,l.email \
+         FROM events e LEFT JOIN leads l ON l.id=e.lead_id WHERE e.campaign_id=?{filter} \
+         ORDER BY e.created_at DESC,e.rowid DESC LIMIT ? OFFSET ?"
+    );
+    let mut query = sqlx::query(&sql).bind(&campaign_id);
+    for kind in &kinds {
+        query = query.bind(kind);
+    }
+    let rows = query
+        .bind(ACTIVITY_PAGE as i64 + 1)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let has_more = rows.len() > ACTIVITY_PAGE;
+    let items: Vec<Value> = rows
+        .iter()
+        .take(ACTIVITY_PAGE)
+        .map(|r| {
+            json!({
+                "id": r.get::<String, _>("id"),
+                "type": r.get::<String, _>("event_type"),
+                "at": r.get::<String, _>("created_at"),
+                "lead_id": r.get::<Option<String>, _>("lead_id"),
+                "email": r.get::<Option<String>, _>("email"),
+                "step_position": r.get::<Option<i64>, _>("step_position"),
+                "detail": r.get::<String, _>("detail"),
+                "metadata": r
+                    .get::<Option<String>, _>("metadata")
+                    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
+            })
+        })
+        .collect();
+    Ok(json!({ "items": items, "has_more": has_more, "offset": offset }))
+}
+
+/// The chart's series, at one of the two ranges the page offers. Anything else reads as the
+/// shorter one, so a stray value cannot ask for a year of rows.
+#[tauri::command]
+async fn campaign_series(state: State<'_, AppState>, campaign_id: String, days: Option<i64>) -> Result<Vec<Value>> {
+    let days = if days == Some(30) { 30 } else { 14 };
+    campaign_day_series(&state.db, &campaign_id, days).await
+}
+
 /// Everything the campaign page shows: its settings, per-state counts, and every
 /// enrolled lead with the state it is in and when it was last sent to.
 #[tauri::command]
@@ -1296,179 +1671,22 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
             })
         })
         .collect();
-    let sent: i64 = sqlx::query_scalar("SELECT count(*) FROM send_logs WHERE campaign_id=?")
-        .bind(&campaign_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(err)?;
-    let positive: i64 = sqlx::query_scalar("SELECT count(*) FROM campaign_leads WHERE campaign_id=? AND outcome='positive'")
-        .bind(&campaign_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(err)?;
     // Every rule is on unless this campaign turned one off.
     let rules = c
         .get::<Option<String>, _>("stop_rules")
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
         .unwrap_or_else(|| json!({"reply": true, "bounce": true, "ooo": true}));
 
-    // Everything this campaign sent, and every answer that came back. The stat row, the
-    // funnel and the activity feed are all read off these two lists, so they are fetched
-    // once and combined here rather than joined five different ways.
-    let send_rows = sqlx::query("SELECT lead_id,step_position,created_at FROM send_logs WHERE campaign_id=? ORDER BY created_at")
-        .bind(&campaign_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(err)?;
-    let sends: Vec<(String, i64, String)> = send_rows
-        .iter()
-        .map(|r| {
-            (
-                r.get::<Option<String>, _>("lead_id").unwrap_or_default(),
-                r.get::<i64, _>("step_position"),
-                r.get::<String, _>("created_at"),
-            )
+    // Every number the page shows about itself comes from one place, counted over leads.
+    let metrics = campaign_metrics(&state.db, &campaign_id).await?;
+    let bounced_leads: Vec<String> = metrics["bounced_leads"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect()
         })
-        .collect();
-
-    let answer_rows = sqlx::query("SELECT m.id,m.subject,m.raw_excerpt,m.received_at,cl.lead_id FROM campaign_leads cl JOIN inbox_messages m ON m.thread_id=cl.thread_ref AND m.ours=0 AND m.deleted_at IS NULL WHERE cl.campaign_id=? ORDER BY m.received_at")
-        .bind(&campaign_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(err)?;
-    // A bounce only exists once the mailbox has synced it, so the classifier the inbox
-    // already uses decides which of these is an answer and which is a failure report.
-    struct Answer {
-        lead_id: String,
-        at: String,
-        subject: String,
-        message_id: String,
-        bounce: bool,
-    }
-    let answers: Vec<Answer> = answer_rows
-        .iter()
-        .map(|r| {
-            let subject = r.get::<Option<String>, _>("subject").unwrap_or_default();
-            let excerpt = r.get::<Option<String>, _>("raw_excerpt").unwrap_or_default();
-            Answer {
-                lead_id: r.get::<String, _>("lead_id"),
-                at: r.get::<Option<String>, _>("received_at").unwrap_or_default(),
-                bounce: rule_category(&format!("{subject} {excerpt}")) == Some("bounce"),
-                subject,
-                message_id: r.get::<String, _>("id"),
-            }
-        })
-        .collect();
-
-    let waiting_rows = sqlx::query("SELECT step_position,count(*) AS n FROM campaign_leads WHERE campaign_id=? AND state='queued' GROUP BY step_position")
-        .bind(&campaign_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(err)?;
-    let mut waiting: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    for row in &waiting_rows {
-        waiting.insert(row.get::<i64, _>("step_position"), row.get::<i64, _>("n"));
-    }
-
-    // A reply belongs to the step the lead had reached when it arrived: their last send at
-    // or before that moment. Without this the funnel would credit every reply to step 0.
-    let mut replied_leads: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut bounced_leads: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut replied_at: std::collections::HashMap<i64, std::collections::HashSet<String>> =
-        std::collections::HashMap::new();
-    for answer in &answers {
-        if answer.bounce {
-            bounced_leads.insert(answer.lead_id.clone());
-            continue;
-        }
-        replied_leads.insert(answer.lead_id.clone());
-        let reached = sends
-            .iter()
-            .filter(|(lead, _, at)| lead == &answer.lead_id && at.as_str() <= answer.at.as_str())
-            .map(|(_, step, _)| *step)
-            .max();
-        if let Some(step) = reached {
-            replied_at.entry(step).or_default().insert(answer.lead_id.clone());
-        }
-    }
-
-    // One row per step that exists or has ever been sent, so a step added after some
-    // sends still appears.
-    let top = (steps.len() as i64).max(sends.iter().map(|(_, step, _)| *step).max().unwrap_or(0));
-    let mut funnel: Vec<Value> = Vec::new();
-    for position in 0..=top {
-        funnel.push(json!({
-            "position": position,
-            "sent": sends.iter().filter(|(_, step, _)| *step == position).count(),
-            "replied": replied_at.get(&position).map(|set| set.len()).unwrap_or(0),
-            "pending": waiting.get(&position).copied().unwrap_or(0),
-        }));
-    }
-
-    // How each subject line is doing, so an A/B test can be read rather than guessed. Only
-    // built when there is more than one line; one line is not a test.
-    let variant_of: std::collections::HashMap<String, i64> = rows
-        .iter()
-        .filter_map(|r| {
-            r.get::<Option<i64>, _>("subject_variant")
-                .map(|variant| (r.get::<String, _>("lead_id"), variant))
-        })
-        .collect();
-    let mut subject_stats: Vec<Value> = Vec::new();
-    if subjects.len() > 1 {
-        for (position, line) in subjects.iter().enumerate() {
-            let position = position as i64;
-            subject_stats.push(json!({
-                "position": position,
-                "subject": line,
-                "leads": variant_of.values().filter(|variant| **variant == position).count(),
-                "sent": sends
-                    .iter()
-                    .filter(|(lead, step, _)| *step == 0 && variant_of.get(lead) == Some(&position))
-                    .count(),
-                "replied": replied_leads
-                    .iter()
-                    .filter(|lead| variant_of.get(*lead) == Some(&position))
-                    .count(),
-            }));
-        }
-    }
-
-    let names: std::collections::HashMap<String, String> = rows
-        .iter()
-        .map(|r| {
-            let name = r
-                .get::<Option<String>, _>("first_name")
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| r.get::<String, _>("email"));
-            (r.get::<String, _>("lead_id"), name)
-        })
-        .collect();
-    let mut recent: Vec<Value> = Vec::new();
-    for (lead, step, at) in &sends {
-        recent.push(json!({
-            "lead_id": lead,
-            "name": names.get(lead).cloned().unwrap_or_default(),
-            "kind": "sent",
-            "step": step,
-            "detail": "",
-            "at": at,
-            "message_id": Value::Null,
-        }));
-    }
-    for answer in &answers {
-        recent.push(json!({
-            "lead_id": answer.lead_id,
-            "name": names.get(&answer.lead_id).cloned().unwrap_or_default(),
-            "kind": if answer.bounce { "bounced" } else { "replied" },
-            "step": Value::Null,
-            "detail": answer.subject,
-            "at": answer.at,
-            "message_id": answer.message_id,
-        }));
-    }
-    recent.sort_by(|a, b| b["at"].as_str().unwrap_or("").cmp(a["at"].as_str().unwrap_or("")));
-    recent.truncate(40);
+        .unwrap_or_default();
 
     Ok(json!({
         "campaign": {
@@ -1493,19 +1711,12 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
         "leads": leads,
         "steps": steps,
         "subjects": subjects,
-        "subject_stats": subject_stats,
-        "sent": sent,
         "stop_rules": rules,
-        "stats": {
-            "sent": sends.len(),
-            "replied": replied_leads.len(),
-            "positive": positive,
-            "bounced": bounced_leads.len(),
-        },
-        "funnel": funnel,
-        "recent": recent,
+        // One object rather than five: the cards, the progress bar, the funnel and the subject
+        // lines all read the same counts, so they cannot drift apart again.
+        "metrics": metrics,
         // Sent as ids so a lead row can say "bounced" without re-running the classifier.
-        "bounced": bounced_leads.iter().collect::<Vec<_>>(),
+        "bounced": bounced_leads,
     }))
 }
 
@@ -1513,16 +1724,24 @@ async fn campaign_detail(state: State<'_, AppState>, campaign_id: String) -> Res
 /// copied: a duplicate starts empty, so it cannot send to anyone by accident.
 #[tauri::command]
 async fn duplicate_campaign(state: State<'_, AppState>, campaign_id: String) -> Result<String> {
+    copy_campaign(&state.db, &campaign_id).await
+}
+
+/// The copy itself, against a pool so that its shape can be tested. Every value has to land in the
+/// column it was meant for — the mode is a literal, so the id and the name come before it — and a
+/// statement that is out by one does not make a slightly wrong copy, it makes a command that
+/// fails every single time it is used.
+async fn copy_campaign(db: &SqlitePool, campaign_id: &str) -> Result<String> {
     let source = sqlx::query("SELECT name,template_id,subject,body,list_name,interval_minutes,account_id,stop_rules,schedule_json,workspace_id,timezone,scheduled_at,daily_cap FROM campaigns WHERE id=?")
-        .bind(&campaign_id)
-        .fetch_optional(&state.db)
+        .bind(campaign_id)
+        .fetch_optional(db)
         .await
         .map_err(err)?
         .ok_or("Campaign not found")?;
     let fresh = id();
     let t = now();
     let name = format!("{} (copy)", source.get::<String, _>("name"));
-    sqlx::query("INSERT INTO campaigns(id,name,mode,template_id,subject,body,list_name,interval_minutes,account_id,schedule_json,stop_rules,timezone,scheduled_at,daily_cap,workspace_id,created_at,updated_at) VALUES(?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO campaigns(id,name,mode,template_id,subject,body,list_name,interval_minutes,account_id,schedule_json,stop_rules,timezone,scheduled_at,daily_cap,workspace_id,created_at,updated_at) VALUES(?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&fresh)
         .bind(&name)
         .bind(source.get::<Option<String>, _>("template_id"))
@@ -1539,25 +1758,25 @@ async fn duplicate_campaign(state: State<'_, AppState>, campaign_id: String) -> 
         .bind(source.get::<String, _>("workspace_id"))
         .bind(&t)
         .bind(&t)
-        .execute(&state.db)
+        .execute(db)
         .await
         .map_err(err)?;
     // Each step carries its own message, so the copy needs no template lookup.
     sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,template_id,body_md,subject_override,enabled,send_date) SELECT lower(hex(randomblob(16))),?,position,delay_minutes,template_id,body_md,subject_override,enabled,send_date FROM sequence_steps WHERE campaign_id=?")
         .bind(&fresh)
-        .bind(&campaign_id)
-        .execute(&state.db)
+        .bind(campaign_id)
+        .execute(db)
         .await
         .map_err(err)?;
     // A duplicated campaign keeps its A/B subject lines, so a test can be picked up from it.
     sqlx::query("INSERT INTO campaign_subjects(id,campaign_id,position,subject,created_at) SELECT lower(hex(randomblob(16))),?,position,subject,? FROM campaign_subjects WHERE campaign_id=?")
         .bind(&fresh)
         .bind(&t)
-        .bind(&campaign_id)
-        .execute(&state.db)
+        .bind(campaign_id)
+        .execute(db)
         .await
         .map_err(err)?;
-    log(&state.db, "info", "campaign_duplicated", &format!("{} -> {}", campaign_id, fresh)).await;
+    log(db, "info", "campaign_duplicated", &format!("{campaign_id} -> {fresh}")).await;
     Ok(fresh)
 }
 
@@ -1623,7 +1842,10 @@ async fn campaign_lead_action(
         return Err("Unknown action".into());
     }
     let outcome = if action == "skip" { Some("skipped") } else { None };
-    sqlx::query("UPDATE campaign_leads SET state='paused',outcome=COALESCE(?,outcome),next_due_at=NULL WHERE campaign_id=? AND lead_id=? AND state='queued'")
+    // A step given up on is one that is still waiting to go out, or one a hand-send failed on:
+    // giving that one up is what lets its campaign finish rather than stay open for a send
+    // that is never going to happen.
+    sqlx::query("UPDATE campaign_leads SET state='paused',outcome=COALESCE(?,outcome),next_due_at=NULL WHERE campaign_id=? AND lead_id=? AND state IN ('queued','failed')")
         .bind(outcome)
         .bind(&campaign_id)
         .bind(&lead_id)
@@ -1636,7 +1858,376 @@ async fn campaign_lead_action(
         .execute(&state.db)
         .await
         .map_err(err)?;
+    let step: Option<i64> =
+        sqlx::query_scalar("SELECT step_position FROM campaign_leads WHERE campaign_id=? AND lead_id=?")
+            .bind(&campaign_id)
+            .bind(&lead_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(err)?;
+    campaign_event(
+        &state.db,
+        "skipped",
+        &campaign_id,
+        Some(&lead_id),
+        step,
+        "Skipped by hand",
+        Some(json!({ "reason": "manual" })),
+    )
+    .await;
     Ok(())
+}
+/// What a waiting step will go out with, in the sender's own words. A first touch wears the line
+/// this lead's variant was given, or the campaign's subject. A follow-up wears the subject
+/// written on its own step, or the one this lead's first email actually carried, with a single
+/// `Re:` in front — the same rule, run here so the panel shows what will be sent rather than a
+/// second opinion about it.
+fn waiting_subject(
+    position: i64,
+    written: Option<&str>,
+    variant_line: Option<&str>,
+    first_subject: Option<&str>,
+    campaign_subject: &str,
+) -> String {
+    let written = written.map(str::trim).filter(|value| !value.is_empty());
+    let base = if position == 0 {
+        written.or(variant_line).unwrap_or(campaign_subject)
+    } else {
+        written.or(first_subject).unwrap_or(campaign_subject)
+    };
+    if position == 0 {
+        base.to_string()
+    } else {
+        reply_subject(base)
+    }
+}
+
+/// Every enrolment in a campaign with the step it is on, the instant that step is stored to
+/// go out, and the three facts that decide whether it ever will: whether an answer came back,
+/// whether the lead is suppressed, and whether the lead is still active at all.
+///
+/// `next` is the one the strip reads, picked with the scheduler's own ordering and its own
+/// gates, so the two cannot disagree about what is next. The due times are read, never worked
+/// out here: they are stored when the step before them was sent. The one exception is a lead
+/// that has never been sent to — there is no step before it — so its rule is applied and stored
+/// on the way past, which is what stops the row having no time at all to show. Each row also
+/// carries the subject its step will go out with, which is the sender's own rule and not a
+/// second copy of it.
+#[tauri::command]
+async fn campaign_followups(state: State<'_, AppState>, campaign_id: String) -> Result<Value> {
+    // One column list, asked two questions. The order is the scheduler's: a lead with no due
+    // time yet counts as due now, so it sorts first.
+    const ONE: &str = "SELECT cl.lead_id,cl.state,cl.step_position,cl.next_due_at,cl.last_error,l.email,l.status AS lead_status,EXISTS(SELECT 1 FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.ours=0 AND m.deleted_at IS NULL) AS replied,EXISTS(SELECT 1 FROM suppressions WHERE suppressions.email=l.email) AS suppressed FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=?";
+    const ORDER: &str = " ORDER BY (cl.next_due_at IS NULL) DESC, cl.next_due_at ASC, l.rowid ASC";
+    // The same gates the tick applies when it picks the lead to send to.
+    const WAITING: &str =
+        " AND cl.state='queued' AND l.status='active' AND l.email NOT IN (SELECT email FROM suppressions)";
+
+    // Before anything is read: a waiting lead with no stored time is given the one its rule
+    // produces, and given it to keep.
+    resolve_due_times(&state.db, &campaign_id).await?;
+
+    let rows = sqlx::query(&format!("{ONE}{ORDER}"))
+        .bind(&campaign_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(err)?;
+    let next = sqlx::query(&format!("{ONE}{WAITING}{ORDER} LIMIT 1"))
+        .bind(&campaign_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?;
+
+    // What each row will say in its subject line, gathered once: the panel shows the subject
+    // rather than making the reader work out whether a step inherits or overrides one.
+    let written: std::collections::HashMap<i64, String> = sqlx::query(
+        "SELECT position,subject_override FROM sequence_steps WHERE campaign_id=? AND subject_override IS NOT NULL",
+    )
+    .bind(&campaign_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(err)?
+    .iter()
+    .map(|row| (row.get("position"), row.get("subject_override")))
+    .collect();
+    let lines: std::collections::HashMap<i64, String> =
+        sqlx::query("SELECT position,subject FROM campaign_subjects WHERE campaign_id=?")
+            .bind(&campaign_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(err)?
+            .iter()
+            .map(|row| (row.get("position"), row.get("subject")))
+            .collect();
+    let campaign_subject: String =
+        sqlx::query_scalar("SELECT COALESCE(subject,'') FROM campaigns WHERE id=?")
+            .bind(&campaign_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(err)?
+            .unwrap_or_default();
+    // Each lead's variant and the subject its first email actually went out with, so a split
+    // audience keeps the line it was given rather than the campaign's first one.
+    let opened: std::collections::HashMap<String, (Option<i64>, Option<String>)> = sqlx::query(
+        "SELECT cl.lead_id,cl.subject_variant,(SELECT s.subject FROM send_logs s WHERE s.campaign_id=cl.campaign_id AND s.lead_id=cl.lead_id AND s.step_position=0 AND s.subject IS NOT NULL ORDER BY s.created_at LIMIT 1) AS first_subject FROM campaign_leads cl WHERE cl.campaign_id=?",
+    )
+    .bind(&campaign_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(err)?
+    .iter()
+    .map(|row| {
+        (
+            row.get::<String, _>("lead_id"),
+            (
+                row.get::<Option<i64>, _>("subject_variant"),
+                row.get::<Option<String>, _>("first_subject"),
+            ),
+        )
+    })
+    .collect();
+
+    let as_row = |r: &sqlx::sqlite::SqliteRow| {
+        let position: i64 = r.get("step_position");
+        let (variant, first) = opened
+            .get(&r.get::<String, _>("lead_id"))
+            .cloned()
+            .unwrap_or_default();
+        json!({
+            "lead_id": r.get::<String, _>("lead_id"),
+            "state": r.get::<String, _>("state"),
+            "step_position": position,
+            "scheduled_at": r.get::<Option<String>, _>("next_due_at"),
+            "last_error": r.get::<Option<String>, _>("last_error"),
+            "email": r.get::<String, _>("email"),
+            "lead_status": r.get::<String, _>("lead_status"),
+            "replied": r.get::<i64, _>("replied") != 0,
+            "suppressed": r.get::<i64, _>("suppressed") != 0,
+            "subject": waiting_subject(
+                position,
+                written.get(&position).map(String::as_str),
+                variant.and_then(|index| lines.get(&index)).map(String::as_str),
+                first.as_deref(),
+                &campaign_subject,
+            ),
+        })
+    };
+
+    Ok(json!({
+        "rows": rows.iter().map(as_row).collect::<Vec<_>>(),
+        "next": next.as_ref().map(as_row),
+    }))
+}
+
+/// Sends one lead's waiting step now, through the same account choice and the same sender the
+/// tick uses, and follows a success through exactly the way the tick does — the next step's
+/// due time is resolved and stored, and the pace clock restarts.
+///
+/// The row is claimed before anything else happens, and only one caller can take a lead from
+/// `queued` to `sending`. A double click, or a click landing while the tick is sending, leaves
+/// the second caller with nothing to claim rather than a second email in the same thread.
+#[tauri::command]
+async fn campaign_followup_send_now(
+    state: State<'_, AppState>,
+    campaign_id: String,
+    lead_id: String,
+) -> Result<()> {
+    let c = sqlx::query("SELECT status,account_id,workspace_id FROM campaigns WHERE id=? AND workspace_id=?")
+        .bind(&campaign_id)
+        .bind(active_workspace(&state.db).await)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(err)?
+        .ok_or("Campaign not found in this workspace")?;
+    let status: String = c.get("status");
+    // The sender refuses a campaign that is not running, so say so here rather than claim the
+    // row and fail it.
+    if !matches!(status.as_str(), "active" | "throttled") {
+        return Err(match status.as_str() {
+            "done" => "This campaign has finished",
+            "paused" => "This campaign is paused — resume it to send",
+            _ => "Launch this campaign before sending",
+        }
+        .into());
+    }
+    let ws: String = c.get("workspace_id");
+    let pinned: Option<String> = c.get("account_id");
+
+    // The claim, and the whole of the once-only guarantee.
+    if !claim_followup(&state.db, &campaign_id, &lead_id).await? {
+        return Err("That follow-up is already on its way, or has already gone".into());
+    }
+
+    // A lead that has answered, bounced or unsubscribed is stopped rather than emailed. Read
+    // after the claim, so nothing can land in between the check and the send.
+    if let Some(why) = held_reason(&state, &campaign_id, &lead_id).await? {
+        sqlx::query("UPDATE campaign_leads SET state='paused',outcome='skipped',next_due_at=NULL,last_error=? WHERE campaign_id=? AND lead_id=?")
+            .bind(&why)
+            .bind(&campaign_id)
+            .bind(&lead_id)
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+        campaign_event(
+            &state.db,
+            "skipped",
+            &campaign_id,
+            Some(&lead_id),
+            None,
+            &why,
+            Some(json!({ "reason": "held", "manual": true })),
+        )
+        .await;
+        return Err(format!("{why} Nothing was sent."));
+    }
+
+    let step: i64 =
+        sqlx::query_scalar("SELECT step_position FROM campaign_leads WHERE campaign_id=? AND lead_id=?")
+            .bind(&campaign_id)
+            .bind(&lead_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(err)?;
+
+    // A follow-up goes out from the mailbox the first email did. A reply from a different address
+    // is a new conversation at the other end, whatever headers it carries, so the step that
+    // answers is sent by whoever the lead has already heard from.
+    let sender = first_touch_account(&state.db, &campaign_id, &lead_id, step)
+        .await?
+        .or(pinned);
+
+    // No capacity is nothing to do with this lead, so the claim is handed straight back and
+    // the row stays where it was.
+    let Some(account_id) = choose_account(&state, sender.as_deref(), Some(&ws)).await? else {
+        sqlx::query("UPDATE campaign_leads SET state='queued',last_error=? WHERE campaign_id=? AND lead_id=? AND state='sending'")
+            .bind("No sending account had capacity")
+            .bind(&campaign_id)
+            .bind(&lead_id)
+            .execute(&state.db)
+            .await
+            .map_err(err)?;
+        return Err("No sending account has capacity right now".into());
+    };
+
+    let (jid, payload) = ensure_job(&state, &campaign_id, &lead_id, &account_id, step).await?;
+    match send_job(&state, &jid, &payload).await {
+        Ok(thread_ref) => {
+            if let Some(thread_ref) = thread_ref {
+                sqlx::query("UPDATE campaign_leads SET thread_ref=? WHERE campaign_id=? AND lead_id=?")
+                    .bind(thread_ref)
+                    .bind(&campaign_id)
+                    .bind(&lead_id)
+                    .execute(&state.db)
+                    .await
+                    .map_err(err)?;
+            }
+            advance_step(&state.db, &campaign_id, &lead_id, step).await?;
+            sqlx::query("UPDATE campaigns SET last_sent_at=?,updated_at=? WHERE id=?")
+                .bind(now())
+                .bind(now())
+                .bind(&campaign_id)
+                .execute(&state.db)
+                .await
+                .map_err(err)?;
+            campaign_event(
+                &state.db,
+                "send_now",
+                &campaign_id,
+                Some(&lead_id),
+                Some(step),
+                "Sent by hand",
+                None,
+            )
+            .await;
+            Ok(())
+        }
+        Err(e) => {
+            // A guard inside the sender may have stopped this lead on its own terms — a reply
+            // that arrived in the last moment. Only a row still claimed is marked failed, so
+            // that stop is left standing and a failed row stays retryable by hand.
+            sqlx::query("UPDATE campaign_leads SET state='failed',last_error=? WHERE campaign_id=? AND lead_id=? AND state='sending'")
+                .bind(&e)
+                .bind(&campaign_id)
+                .bind(&lead_id)
+                .execute(&state.db)
+                .await
+                .map_err(err)?;
+            Err(e)
+        }
+    }
+}
+
+/// Takes a waiting step for one caller and no other. This is the whole of the once-only
+/// guarantee: the update is the claim, and a second caller — a double click, or the tick
+/// arriving at the same moment — finds the row already out of `queued` and gets nothing.
+async fn claim_followup(db: &SqlitePool, campaign_id: &str, lead_id: &str) -> Result<bool> {
+    let claimed = sqlx::query(
+        "UPDATE campaign_leads SET state='sending',last_error=NULL WHERE campaign_id=? AND lead_id=? AND state IN ('queued','failed')",
+    )
+    .bind(campaign_id)
+    .bind(lead_id)
+    .execute(db)
+    .await
+    .map_err(err)?;
+    Ok(claimed.rows_affected() > 0)
+}
+
+/// Why a lead must not be emailed right now, when there is a reason: an unsubscribe, a
+/// bounce, or any answer at all. The same three the sender stops on, read the same way — a
+/// bounce is the one classifier verdict that is a report about the mailbox rather than a
+/// person talking.
+async fn held_reason(st: &AppState, campaign_id: &str, lead_id: &str) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT l.email,cl.thread_ref FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? AND cl.lead_id=?")
+        .bind(campaign_id)
+        .bind(lead_id)
+        .fetch_optional(&st.db)
+        .await
+        .map_err(err)?
+        .ok_or("That lead is not on this campaign")?;
+    let suppressed: i64 = sqlx::query_scalar("SELECT count(*) FROM suppressions WHERE email=?")
+        .bind(row.get::<String, _>("email"))
+        .fetch_one(&st.db)
+        .await
+        .map_err(err)?;
+    if suppressed > 0 {
+        return Ok(Some("That lead has unsubscribed.".into()));
+    }
+    // Nothing has gone to this lead yet, so there is no thread and no answer to find.
+    let Some(thread) = row.get::<Option<String>, _>("thread_ref") else {
+        return Ok(None);
+    };
+    let answers = sqlx::query("SELECT subject,raw_excerpt FROM inbox_messages WHERE thread_id=? AND ours=0 AND deleted_at IS NULL")
+        .bind(&thread)
+        .fetch_all(&st.db)
+        .await
+        .map_err(err)?;
+    if answers.is_empty() {
+        return Ok(None);
+    }
+    let mut bounced = false;
+    let mut unsubscribed = false;
+    for answer in &answers {
+        let text = format!(
+            "{} {}",
+            answer.get::<Option<String>, _>("subject").unwrap_or_default(),
+            answer.get::<Option<String>, _>("raw_excerpt").unwrap_or_default()
+        );
+        match rule_category(&text) {
+            Some("bounce") => bounced = true,
+            Some("unsubscribe") => unsubscribed = true,
+            _ => {}
+        }
+    }
+    Ok(Some(
+        if bounced {
+            "That mailbox bounced."
+        } else if unsubscribed {
+            "That lead asked to be removed."
+        } else {
+            "That lead has replied."
+        }
+        .to_string(),
+    ))
 }
 /// The categories the knowledge base understands. Mirrored in src/lib/knowledge.ts.
 const KNOWLEDGE_CATEGORIES: [&str; 7] = [
@@ -2883,6 +3474,174 @@ async fn switch_to(db: &SqlitePool, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The file the database lives in, as SQLite itself reports it. A copy of it belongs beside it,
+/// and the rest of the app has never needed to know where its own data directory is.
+async fn database_file(db: &SqlitePool) -> Result<PathBuf> {
+    let file: Option<String> =
+        sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name='main'")
+            .fetch_optional(db)
+            .await
+            .map_err(err)?;
+    file.filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| "Could not find the database file".to_string())
+}
+
+/// Empties one workspace of everything it holds. Nothing belonging to another workspace, or to
+/// the app itself, is touched.
+///
+/// Three things are left alone on purpose. The connected mailboxes stay, tokens and all, because
+/// a fresh start should not mean asking Google for permission again. The suppression list stays,
+/// because it is the record of who asked never to be written to — a reset that forgot it would
+/// begin by emailing them all again. And the agents' own definitions stay: they are configuration
+/// the reply classifier reads, not history.
+async fn wipe_workspace(db: &SqlitePool, ws: &str) -> Result<()> {
+    let mut tx = db.begin().await.map_err(err)?;
+    // The send history holds the foreign key into the queue, so it goes first, and the jobs it
+    // named are remembered for as long as it takes to clear them.
+    let job_ids: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT job_id FROM send_logs WHERE workspace_id=?")
+            .bind(ws)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(err)?;
+    sqlx::query("DELETE FROM send_logs WHERE workspace_id=?")
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    for chunk in job_ids.chunks(100) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let statement = format!("DELETE FROM jobs WHERE id IN ({placeholders})");
+        let mut query = sqlx::query(&statement);
+        for job in chunk {
+            query = query.bind(job);
+        }
+        query.execute(&mut *tx).await.map_err(err)?;
+    }
+    // A campaign's own queue is keyed rather than linked, and it has to go while the campaigns
+    // are still here to match it against.
+    sqlx::query("DELETE FROM jobs WHERE EXISTS (SELECT 1 FROM campaigns c WHERE c.workspace_id=? AND jobs.idempotency_key LIKE c.id || ':%')")
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    // Everything a campaign is made of, then the campaigns. The enrolments would cascade, but a
+    // table cleared by hand says out loud that it was meant to go.
+    for table in [
+        "campaign_leads",
+        "sequence_steps",
+        "campaign_subjects",
+        "campaign_nodes",
+        "campaign_edges",
+        "email_drafts",
+        "reply_judgements",
+    ] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} WHERE campaign_id IN (SELECT id FROM campaigns WHERE workspace_id=?)"
+        ))
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    }
+    sqlx::query("DELETE FROM campaigns WHERE workspace_id=?")
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    // The audience, then everything that was written to or about it. Templates go after both the
+    // campaigns and their steps, which point at them without a cascade behind it.
+    for table in [
+        "leads",
+        "templates",
+        "inbox_messages",
+        "message_drafts",
+        "knowledge",
+        "agent_runs",
+        "subjects",
+        "events",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE workspace_id=?"))
+            .bind(ws)
+            .execute(&mut *tx)
+            .await
+            .map_err(err)?;
+    }
+    // The day's counters belong to sends that no longer exist.
+    sqlx::query("UPDATE accounts SET sent_today=0,sent_date=date('now') WHERE workspace_id=?")
+        .bind(ws)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    tx.commit().await.map_err(err)?;
+    Ok(())
+}
+
+/// A fresh start for the workspace that is open: its campaigns, its audience, the history of
+/// what was sent and answered, all of it goes.
+///
+/// A copy of the database is written beside it before anything is deleted and its path is handed
+/// back, because this is the one action in the app that cannot be undone. The copy is made with
+/// `VACUUM INTO`, which writes a consistent whole out of a database that may be mid-write —
+/// something a file copy cannot promise.
+#[tauri::command]
+async fn clean_workspace(state: State<'_, AppState>) -> Result<Value> {
+    let ws = active_workspace(&state.db).await;
+
+    // Nothing new may start while this runs: a campaign the scheduler picked up between here and
+    // the deletes would send as the campaign it belongs to is being taken away.
+    sqlx::query("UPDATE campaigns SET status='paused',updated_at=? WHERE workspace_id=? AND status IN ('active','throttled')")
+        .bind(now())
+        .bind(&ws)
+        .execute(&state.db)
+        .await
+        .map_err(err)?;
+
+    let db_file = database_file(&state.db).await?;
+    let backup = db_file.with_file_name(format!(
+        "{}-before-clean-{}-{}.sqlite",
+        db_file
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("maily"),
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        &id()[..4],
+    ));
+    sqlx::query("VACUUM INTO ?")
+        .bind(backup.to_string_lossy().to_string())
+        .execute(&state.db)
+        .await
+        .map_err(|e| format!("Could not save a copy before cleaning: {e}"))?;
+
+    // What is about to go, so the answer can say what went rather than only that something did.
+    let counted = sqlx::query(
+        "SELECT (SELECT count(*) FROM leads WHERE workspace_id=?) AS leads,(SELECT count(*) FROM campaigns WHERE workspace_id=?) AS campaigns,(SELECT count(*) FROM send_logs WHERE workspace_id=?) AS sends,(SELECT count(*) FROM inbox_messages WHERE workspace_id=?) AS messages,(SELECT count(*) FROM templates WHERE workspace_id=?) AS templates",
+    )
+    .bind(&ws)
+    .bind(&ws)
+    .bind(&ws)
+    .bind(&ws)
+    .bind(&ws)
+    .fetch_one(&state.db)
+    .await
+    .map_err(err)?;
+
+    wipe_workspace(&state.db, &ws).await?;
+    log(&state.db, "warn", "workspace_cleaned", &ws).await;
+
+    Ok(json!({
+        "backup": backup.to_string_lossy(),
+        "removed": {
+            "leads": counted.get::<i64, _>("leads"),
+            "campaigns": counted.get::<i64, _>("campaigns"),
+            "sends": counted.get::<i64, _>("sends"),
+            "messages": counted.get::<i64, _>("messages"),
+            "templates": counted.get::<i64, _>("templates"),
+        },
+    }))
+}
+
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Value> {
     let rows = sqlx::query("SELECT key,value FROM app_settings")
@@ -2963,6 +3722,7 @@ async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Res
     if c.get::<String, _>("status") == "active" {
         return Err("Campaign is already running".into());
     }
+    let was = c.get::<String, _>("status");
     // Enrolment reads the campaign's own workspace, so a launch can never sweep up
     // another workspace's leads.
     let ws: String = c.get("workspace_id");
@@ -3018,6 +3778,20 @@ async fn launch_campaign(state: State<'_, AppState>, campaign_id: String) -> Res
         .execute(&state.db)
         .await
         .map_err(err)?;
+    // Starting a campaign that had been paused is resuming it, and the history says so; a
+    // first launch is the campaign's own beginning and needs no line.
+    if was == "paused" {
+        campaign_event(
+            &state.db,
+            "resumed",
+            &campaign_id,
+            None,
+            None,
+            "Campaign resumed",
+            None,
+        )
+        .await;
+    }
     log(
         &state.db,
         "info",
@@ -3036,6 +3810,16 @@ async fn pause_campaign(state: State<'_, AppState>, campaign_id: String) -> Resu
         .execute(&state.db)
         .await
         .map_err(err)?;
+    campaign_event(
+        &state.db,
+        "paused",
+        &campaign_id,
+        None,
+        None,
+        "Campaign paused",
+        None,
+    )
+    .await;
     Ok(())
 }
 
@@ -3172,11 +3956,13 @@ async fn process_due(st: &AppState) -> Result<()> {
         .map_err(err)?;
 
         let Some(due) = due else {
-            // Nothing due right now. The campaign is finished only when no lead is
-            // still waiting on a later step; otherwise it stays active and comes back
-            // when the next due time arrives.
+            // Nothing due right now. The campaign is finished only when no lead is still
+            // waiting on a later step; otherwise it stays active and comes back when the
+            // next due time arrives. A lead a hand-sent step is in the middle of sending,
+            // or one that step failed on, is still waiting — the campaign does not finish
+            // underneath a send that is under way, and a failed row stays reachable.
             let pending: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? AND cl.state='queued' AND l.status='active' AND l.email NOT IN (SELECT email FROM suppressions)",
+                "SELECT count(*) FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? AND cl.state IN ('queued','sending','failed') AND l.status='active' AND l.email NOT IN (SELECT email FROM suppressions)",
             )
             .bind(&campaign_id)
             .fetch_one(&st.db)
@@ -3196,7 +3982,12 @@ async fn process_due(st: &AppState) -> Result<()> {
         let lead_id: String = due.get("lead_id");
         let step: i64 = due.get("step_position");
 
-        let Some(account_id) = choose_account(st, account.as_deref(), Some(&ws)).await? else {
+        // A follow-up goes out from the mailbox the first email did: the same reason the manual
+        // send reads the same thing. A first touch is sent by the campaign's own account.
+        let sender = first_touch_account(&st.db, &campaign_id, &lead_id, step)
+            .await?
+            .or(account.clone());
+        let Some(account_id) = choose_account(st, sender.as_deref(), Some(&ws)).await? else {
             sqlx::query("UPDATE campaigns SET status='throttled',updated_at=? WHERE id=?")
                 .bind(now())
                 .bind(&campaign_id)
@@ -3219,7 +4010,7 @@ async fn process_due(st: &AppState) -> Result<()> {
                         .await
                         .map_err(err)?;
                 }
-                advance_step(st, &campaign_id, &lead_id, step).await?;
+                advance_step(&st.db, &campaign_id, &lead_id, step).await?;
                 sqlx::query("UPDATE campaigns SET last_sent_at=?,updated_at=? WHERE id=?")
                     .bind(now())
                     .bind(now())
@@ -3243,15 +4034,20 @@ async fn process_due(st: &AppState) -> Result<()> {
 }
 
 /// Moves a lead to the next enabled follow-up after `from_step`, or finishes the
-/// sequence when there is none left. The next step's wait is resolved here, so the due
-/// time is persisted and survives an app restart.
-async fn advance_step(st: &AppState, campaign_id: &str, lead_id: &str, from_step: i64) -> Result<()> {
+/// sequence when there is none left, reporting which of the two it did. The next step's
+/// wait is resolved here, so the due time is persisted and survives an app restart.
+async fn advance_step(
+    db: &SqlitePool,
+    campaign_id: &str,
+    lead_id: &str,
+    from_step: i64,
+) -> Result<bool> {
     let next = sqlx::query(
         "SELECT position,delay_minutes,delay_days,send_date FROM sequence_steps WHERE campaign_id=? AND enabled=1 AND position>? ORDER BY position LIMIT 1",
     )
     .bind(campaign_id)
     .bind(from_step)
-    .fetch_optional(&st.db)
+    .fetch_optional(db)
     .await
     .map_err(err)?;
 
@@ -3266,20 +4062,58 @@ async fn advance_step(st: &AppState, campaign_id: &str, lead_id: &str, from_step
                 .bind(step_due_at(delay, days.unwrap_or(0), send_date.as_deref()))
                 .bind(campaign_id)
                 .bind(lead_id)
-                .execute(&st.db)
+                .execute(db)
                 .await
                 .map_err(err)?;
+            campaign_event(
+                db,
+                "scheduled",
+                campaign_id,
+                Some(lead_id),
+                Some(position),
+                "Follow-up scheduled",
+                Some(json!({ "delay_minutes": delay })),
+            )
+            .await;
+            Ok(true)
         }
         None => {
             sqlx::query("UPDATE campaign_leads SET state='done',outcome='completed',next_due_at=NULL WHERE campaign_id=? AND lead_id=?")
                 .bind(campaign_id)
                 .bind(lead_id)
-                .execute(&st.db)
+                .execute(db)
                 .await
                 .map_err(err)?;
+            Ok(false)
         }
     }
-    Ok(())
+}
+
+/// Takes back on the leads that had finished a campaign, for the steps it has since grown:
+/// a follow-up added after they ran out has to enrol them, or it exists in the funnel and in
+/// nobody's schedule. Only the leads still worth writing to come back — a send discovers a
+/// reply or a suppression on its own, but there is no reason to schedule one. Reports how
+/// many were taken back on.
+async fn reopen_finished(db: &SqlitePool, campaign_id: &str) -> Result<usize> {
+    let finished = sqlx::query(
+        "SELECT cl.lead_id,cl.step_position FROM campaign_leads cl JOIN leads l ON l.id=cl.lead_id WHERE cl.campaign_id=? AND cl.state='done' AND l.status='active' AND l.email NOT IN (SELECT email FROM suppressions) AND NOT EXISTS(SELECT 1 FROM inbox_messages m WHERE m.thread_id=cl.thread_ref AND m.ours=0 AND m.deleted_at IS NULL)",
+    )
+    .bind(campaign_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    let mut reopened = 0;
+    for row in &finished {
+        // A finished lead still sits on the step it last sent, so the same advance every send
+        // performs moves it onto the new step — and leaves it alone when the sequence has not
+        // grown past where it stopped.
+        let lead_id: String = row.get("lead_id");
+        let from: i64 = row.get("step_position");
+        if advance_step(db, campaign_id, &lead_id, from).await? {
+            reopened += 1;
+        }
+    }
+    Ok(reopened)
 }
 
 /// A wait of 0-20 minutes added to every scheduled send so a list does not go out in
@@ -3293,7 +4127,17 @@ fn jitter_minutes() -> i64 {
 /// which is the previous step's send, since the next due time is computed right after a
 /// send. The result is formatted like `now()` so the two compare correctly in SQL.
 fn step_due_at(delay_minutes: i64, delay_days: i64, send_date: Option<&str>) -> String {
-    let base = Utc::now();
+    step_due_from(Utc::now(), delay_minutes, delay_days, send_date)
+}
+
+/// The same rule counted from an instant other than now, for a waiting lead that never had its
+/// due time stored: the wait is measured from the step before it, which is that step's send.
+fn step_due_from(
+    base: chrono::DateTime<Utc>,
+    delay_minutes: i64,
+    delay_days: i64,
+    send_date: Option<&str>,
+) -> String {
     let jitter = chrono::Duration::minutes(jitter_minutes());
     if let Some(date) = send_date.map(str::trim).filter(|value| !value.is_empty()) {
         if let Ok(day) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
@@ -3309,6 +4153,76 @@ fn step_due_at(delay_minutes: i64, delay_days: i64, send_date: Option<&str>) -> 
         + chrono::Duration::minutes(delay_minutes.max(0) + delay_days.max(0) * 1440)
         + jitter)
         .to_rfc3339()
+}
+
+/// Gives a waiting lead the time it is waiting for. A lead enrolled by a launch has none —
+/// nothing has been sent to it yet for a wait to be measured from — and an empty due time is
+/// what the page used to read as "next tick", which is not a time at all. So the rule that
+/// would have produced it is applied here and stored: a first email is due when the campaign is,
+/// and a follow-up is due its delay after the step before it went out.
+async fn resolve_due_times(db: &SqlitePool, campaign_id: &str) -> Result<()> {
+    let waiting = sqlx::query(
+        "SELECT lead_id,step_position FROM campaign_leads WHERE campaign_id=? AND state IN ('queued','failed') AND next_due_at IS NULL",
+    )
+    .bind(campaign_id)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    // A campaign held until a date and time: its first email is due then, not before.
+    let start: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT scheduled_at FROM campaigns WHERE id=?")
+        .bind(campaign_id)
+        .fetch_optional(db)
+        .await
+        .map_err(err)?
+        .flatten();
+    for row in &waiting {
+        let lead_id: String = row.get("lead_id");
+        let position: i64 = row.get("step_position");
+        let due = if position == 0 {
+            start.clone().unwrap_or_else(now)
+        } else {
+            let step = sqlx::query("SELECT delay_minutes,delay_days,send_date FROM sequence_steps WHERE campaign_id=? AND position=?")
+                .bind(campaign_id)
+                .bind(position)
+                .fetch_optional(db)
+                .await
+                .map_err(err)?;
+            let sent: Option<String> = sqlx::query_scalar::<_, Option<String>>("SELECT max(created_at) FROM send_logs WHERE campaign_id=? AND lead_id=?")
+                .bind(campaign_id)
+                .bind(&lead_id)
+                .fetch_optional(db)
+                .await
+                .map_err(err)?
+                .flatten();
+            match (step, sent) {
+                (Some(step), Some(sent)) => {
+                    // From the step before this one went out, jitter and all, so the number reads
+                    // as the one a send would have stored.
+                    let base = moment(&sent).unwrap_or_else(Utc::now);
+                    step_due_from(
+                        base,
+                        step.get::<i64, _>("delay_minutes"),
+                        step.get::<Option<i64>, _>("delay_days").unwrap_or(0),
+                        step.get::<Option<String>, _>("send_date").as_deref(),
+                    )
+                }
+                // Nothing to count from: due now, which is what the scheduler reads an empty
+                // due time as anyway.
+                _ => now(),
+            }
+        };
+        sqlx::query("UPDATE campaign_leads SET next_due_at=? WHERE campaign_id=? AND lead_id=? AND next_due_at IS NULL")
+            .bind(&due)
+            .bind(campaign_id)
+            .bind(&lead_id)
+            .execute(db)
+            .await
+            .map_err(err)?;
+    }
+    Ok(())
 }
 
 /// The first instant of today, UTC, as the timestamps being compared are written. What a
@@ -3699,6 +4613,126 @@ fn recipient_list(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// An RFC Message-ID without the angle brackets the headers are written with, so one can be
+/// wrapped in exactly one pair whatever shape a provider handed it back in.
+fn message_id(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .to_string()
+}
+
+/// A Message-ID as a header writes it: one pair of angle brackets and nothing else.
+fn angle(id: &str) -> String {
+    format!("<{}>", message_id(id))
+}
+
+/// A chain of Message-IDs as one header value, each in its own pair, oldest first.
+fn angle_chain(chain: &str) -> String {
+    chain
+        .split_whitespace()
+        .map(angle)
+        .filter(|id| id != "<>")
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The `Message-ID` a header list carries, in header form, whatever case the provider wrote the
+/// name in.
+///
+/// The case is the point: a provider answers with the header names as it holds them rather than
+/// as they were typed, so a lookup that insists on `Message-ID` finds nothing in a list that says
+/// `Message-Id` — and then every send looks like one that went out without an id at all.
+fn headers_message_id(headers: &Value) -> Option<String> {
+    let list = headers.as_array()?;
+    for header in list {
+        let named = header["name"]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("message-id"));
+        if !named {
+            continue;
+        }
+        let id = message_id(header["value"].as_str().unwrap_or_default());
+        if !id.is_empty() {
+            return Some(angle(&id));
+        }
+    }
+    None
+}
+
+/// The same, read out of the message as it went down the wire: the header block at the top, which
+/// ends at the first blank line. That is what stops a body quoting `Message-ID` from being read
+/// as one.
+///
+/// This is the last word on what a message left with, because it is the message rather than an
+/// index of it — a relay that rewrote the id we handed it shows the rewrite here and nowhere
+/// else.
+fn raw_message_id(raw: &[u8]) -> Option<String> {
+    for line in String::from_utf8_lossy(raw).lines() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("message-id") {
+            continue;
+        }
+        let id = message_id(value);
+        if !id.is_empty() {
+            return Some(angle(&id));
+        }
+    }
+    None
+}
+
+/// The Message-ID a message leaves with, in the shape the RFC asks for: a unique local part at
+/// the sender's own domain.
+///
+/// We choose it rather than waiting to read the provider's back. A provider that will not answer
+/// the question — a token without the read scope, a rate limit, a transport that refuses the
+/// call — would otherwise leave every send with no id at all, and every follow-up answering
+/// nothing. A Message-ID that is already in the message is left alone by every relay worth
+/// sending through, so this is the one the recipient's client files the conversation under.
+fn make_message_id(from: &str) -> String {
+    let address = extract_email(from);
+    let domain = address
+        .rsplit('@')
+        .next()
+        .map(str::trim)
+        .filter(|value| value.contains('.') && !value.contains(' '))
+        .unwrap_or("maily.local");
+    format!("<{}@{}>", Uuid::new_v4().simple(), domain)
+}
+
+/// The subject a follow-up wears: the first email's, with one `Re:` in front of it. Any `Re:`
+/// already on the front is taken off first, however it was capitalised and however many there
+/// are, so a subject that was typed with one — or inherited from an email that had one — does
+/// not end up as `Re: Re: what it was`.
+fn reply_subject(base: &str) -> String {
+    let mut rest = base.trim();
+    loop {
+        let lower = rest.to_lowercase();
+        let stripped = lower
+            .strip_prefix("re:")
+            .or_else(|| lower.strip_prefix("re :"));
+        match stripped {
+            // Sliced from the original by the matched length, so the case of what follows is
+            // left exactly as it was written.
+            Some(remainder) => rest = rest[rest.len() - remainder.len()..].trim_start(),
+            None => break,
+        }
+    }
+    if rest.is_empty() {
+        "Re:".to_string()
+    } else {
+        format!("Re: {rest}")
+    }
+}
+
 /// The raw MIME for a message. A rendered email goes out as `multipart/alternative`, so
 /// a plain-text reader still gets a sane body; a campaign template has no HTML and stays
 /// a single `text/plain` part. Every part is base64 so no line of the body can be
@@ -3716,6 +4750,24 @@ fn mime_message(mail: &Mail) -> String {
         raw.push_str(&format!("Bcc: {}\r\n", mail.bcc));
     }
     raw.push_str(&format!("Subject: {}\r\n", mail.subject));
+    // The id this message leaves with, then the ids it answers. Both are headers a client threads
+    // a conversation by, and neither is ever shown to the recipient.
+    if let Some(id) = mail.message_id.filter(|id| !id.trim().is_empty()) {
+        raw.push_str(&format!("Message-ID: {id}\r\n"));
+    }
+    // A reply says so in its headers, and this is the only part of it that reaches the other
+    // end: Gmail files a message into the thread it is handed by id, which no recipient ever
+    // sees, so without these a follow-up lands as a conversation of its own.
+    if let Some(parent) = mail.reference.map(message_id).filter(|id| !id.is_empty()) {
+        raw.push_str(&format!("In-Reply-To: {}\r\n", angle(&parent)));
+        // The chain when there is one, the parent alone when that is all that is known.
+        let references = mail
+            .references
+            .map(angle_chain)
+            .filter(|chain| !chain.is_empty())
+            .unwrap_or_else(|| angle(&parent));
+        raw.push_str(&format!("References: {references}\r\n"));
+    }
     raw.push_str("MIME-Version: 1.0\r\n");
     let Some(html) = mail.html else {
         raw.push_str("Content-Type: text/plain; charset=\"UTF-8\"\r\n\r\n");
@@ -3798,61 +4850,81 @@ fn provider_message(status: reqwest::StatusCode, body: &str) -> String {
     format!("{status}{reason}: {message}{hint}")
 }
 
-/// Posts one message through the provider. Gmail threads from `Mail::thread` (a thread
-/// id); Microsoft from the same field (the RFC Message-ID of the message being replied
-/// to). Missing threading data never blocks a send. Returns the parsed response.
+/// The request Gmail wants: the message itself, and — when one is known — the thread to file it
+/// into. The thread is Google's own name for a conversation and never travels in the message, so
+/// the reply headers are the only part of the threading the recipient's client can see.
+fn gmail_body(mail: &Mail<'_>) -> Value {
+    let mut body = json!({"raw": URL_SAFE_NO_PAD.encode(mime_message(mail))});
+    if let Some(thread) = mail.thread.filter(|thread| !thread.trim().is_empty()) {
+        body["threadId"] = json!(thread);
+    }
+    body
+}
+
+/// The request Graph wants: a JSON document rather than a message, so the reply headers have to be
+/// named one at a time. Microsoft threads on those alone, since it has no equivalent of Gmail's
+/// thread id to hand over.
+fn graph_body(mail: &Mail<'_>) -> Value {
+    let mut message = json!({
+        "subject": mail.subject,
+        "body": {
+            "contentType": if mail.html.is_some() { "HTML" } else { "Text" },
+            "content": mail.html.unwrap_or(mail.text),
+        },
+        "toRecipients": [{"emailAddress":{"address": mail.to}}],
+    });
+    let cc = recipient_list(mail.cc);
+    if !cc.is_empty() {
+        message["ccRecipients"] = json!(cc
+            .iter()
+            .map(|a| json!({"emailAddress":{"address":a}}))
+            .collect::<Vec<_>>());
+    }
+    let bcc = recipient_list(mail.bcc);
+    if !bcc.is_empty() {
+        message["bccRecipients"] = json!(bcc
+            .iter()
+            .map(|a| json!({"emailAddress":{"address":a}}))
+            .collect::<Vec<_>>());
+    }
+    if let Some(reference) = mail.reference.map(message_id).filter(|id| !id.is_empty()) {
+        let references = mail
+            .references
+            .map(angle_chain)
+            .filter(|chain| !chain.is_empty())
+            .unwrap_or_else(|| angle(&reference));
+        message["internetMessageHeaders"] = json!([
+            {"name":"In-Reply-To","value":angle(&reference)},
+            {"name":"References","value":references}
+        ]);
+    }
+    json!({"message": message})
+}
+
+/// Posts one message through the provider. Gmail files the message into `Mail::thread` by id
+/// and threads it at the far end from `Mail::reference`; Microsoft has only the reference,
+/// which it sends as the reply headers. Missing threading data never blocks a send. Returns
+/// the parsed response.
 async fn deliver(st: &AppState, provider: &str, access: &str, mail: &Mail<'_>) -> Result<Value> {
-    let response = if provider == "gmail" {
-        let mut request = json!({"raw": URL_SAFE_NO_PAD.encode(mime_message(mail))});
-        if let Some(thread) = mail.thread {
-            request["threadId"] = json!(thread);
-        }
-        st.http
-            .post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
-            .bearer_auth(access)
-            .json(&request)
-            .send()
-            .await
-            .map_err(err)?
+    let (url, body) = if provider == "gmail" {
+        (
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+            gmail_body(mail),
+        )
     } else {
-        // Graph takes one body and no plain-text alternative, so a rendered message
-        // arrives as HTML and a template arrives as text.
-        let mut message = json!({
-            "subject": mail.subject,
-            "body": {
-                "contentType": if mail.html.is_some() { "HTML" } else { "Text" },
-                "content": mail.html.unwrap_or(mail.text),
-            },
-            "toRecipients": [{"emailAddress":{"address": mail.to}}],
-        });
-        let cc = recipient_list(mail.cc);
-        if !cc.is_empty() {
-            message["ccRecipients"] = json!(cc
-                .iter()
-                .map(|a| json!({"emailAddress":{"address":a}}))
-                .collect::<Vec<_>>());
-        }
-        let bcc = recipient_list(mail.bcc);
-        if !bcc.is_empty() {
-            message["bccRecipients"] = json!(bcc
-                .iter()
-                .map(|a| json!({"emailAddress":{"address":a}}))
-                .collect::<Vec<_>>());
-        }
-        if let Some(reference) = mail.thread {
-            message["internetMessageHeaders"] = json!([
-                {"name":"In-Reply-To","value":format!("<{}>", reference)},
-                {"name":"References","value":format!("<{}>", reference)}
-            ]);
-        }
-        st.http
-            .post("https://graph.microsoft.com/v1.0/me/sendMail")
-            .bearer_auth(access)
-            .json(&json!({"message": message}))
-            .send()
-            .await
-            .map_err(err)?
+        (
+            "https://graph.microsoft.com/v1.0/me/sendMail",
+            graph_body(mail),
+        )
     };
+    let response = st
+        .http
+        .post(url)
+        .bearer_auth(access)
+        .json(&body)
+        .send()
+        .await
+        .map_err(err)?;
     let response = checked(response).await?;
     if provider == "gmail" {
         response.json().await.map_err(err)
@@ -4008,10 +5080,28 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
             let html = row
                 .get::<Option<String>, _>("body_html")
                 .filter(|value| !value.trim().is_empty());
-            let subject = row
+            // Nothing written on the step: it continues the conversation the first touch
+            // opened, so it wears that subject. Read from what this lead was actually sent,
+            // so a split audience keeps the line its own variant was given, and from the
+            // campaign's own subject when there is no send on record for the lead.
+            let subject = match row
                 .get::<Option<String>, _>("subject_override")
                 .map(|value| value.trim().to_string())
-                .unwrap_or_default();
+                .filter(|value| !value.is_empty())
+            {
+                Some(written) => written,
+                None => sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT COALESCE((SELECT subject FROM send_logs WHERE campaign_id=? AND lead_id=? AND step_position=0 AND subject IS NOT NULL ORDER BY created_at LIMIT 1),(SELECT subject FROM campaigns WHERE id=?))",
+                )
+                .bind(campaign)
+                .bind(lead_id)
+                .bind(campaign)
+                .fetch_optional(&st.db)
+                .await
+                .map_err(err)?
+                .flatten()
+                .unwrap_or_default(),
+            };
             (subject, markdown, text, html, None)
         };
 
@@ -4077,7 +5167,9 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(err)?;
-        if state.as_deref() != Some("queued") {
+        // `sending` is a row a hand-sent step claimed before calling in here, so the claim it
+        // is running under has to pass this guard too.
+        if !matches!(state.as_deref(), Some("queued") | Some("sending")) {
             tx.rollback().await.ok();
             return Err("That lead is no longer waiting on this step".into());
         }
@@ -4107,6 +5199,16 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
                 .map_err(err)?;
             tx.commit().await.map_err(err)?;
             log(&st.db, "info", "followup_held", &format!("{} replied", lead_id)).await;
+            campaign_event(
+                &st.db,
+                "skipped",
+                campaign,
+                Some(lead_id),
+                Some(step),
+                "The thread has a reply",
+                Some(json!({ "reason": "replied" })),
+            )
+            .await;
             return Err("The thread has a reply; follow-up held".into());
         }
         tx.commit().await.map_err(err)?;
@@ -4122,7 +5224,7 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
     let provider = a.get::<String, _>("provider");
     let from = a.get::<String, _>("email");
     let to = lead.get::<String, _>("email");
-    let mut subject = render(&subject_source, &lead);
+    let subject = render(&subject_source, &lead);
     // A template's body still resolves its variables against the lead; a single's step
     // arrived already rendered, so this is a no-op for it.
     let body = render(&body, &lead);
@@ -4144,9 +5246,48 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         log(&st.db, "warn", "template_variable_missing", lead_id).await;
         return Err("Template has unresolved variables; send blocked and lead flagged".into());
     }
-    if thread_ref.is_some() && !subject.to_lowercase().starts_with("re:") {
-        subject = format!("Re: {}", subject);
-    }
+    // A follow-up answers the first email, so it wears that email's subject with one `Re:` —
+    // never two, and never a variant line of its own. A first touch wears what it was written
+    // with, unchanged.
+    let subject = if step > 0 {
+        reply_subject(&subject)
+    } else {
+        subject
+    };
+    let mut access = access_token(st, account_id, &provider, false).await?;
+    // The ids this step answers. Read from what has already gone out to this lead rather than
+    // asked of the provider: every send records its own Message-ID, so the conversation is
+    // rebuilt from the messages themselves and a provider that is slow, rate-limited or simply
+    // unwilling to answer that question can no longer leave a follow-up in a thread of its own.
+    //
+    // A lead with nothing on record — an email sent before ids were kept, or a first touch that
+    // never happened — has no parent to answer: the step goes out as a plain email, with a line
+    // in the log saying why, because a send that refuses to happen helps nobody.
+    let (parent, references) = if step > 0 {
+        match sent_chain(&st.db, campaign, lead_id, step).await? {
+            Some((parent, chain)) => (Some(parent), Some(chain)),
+            None => {
+                log(
+                    &st.db,
+                    "warn",
+                    "followup_unthreaded",
+                    &format!("{lead_id}: no earlier message id on step {step}"),
+                )
+                .await;
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    // Gmail files a message into a thread by id, which is the one part of this that never
+    // reaches the recipient. Microsoft names the conversation itself and takes it from the
+    // headers, so nothing is passed for it.
+    let thread = thread_ref.as_deref().filter(|_| provider == "gmail");
+    // The id this message goes out with. Chosen here rather than read back afterwards, because
+    // the step after this one needs something to answer whether or not the provider will say
+    // what it sent.
+    let ours = make_message_id(&from);
     // Both halves when the step carries a rendered pair, the text alone when there is none —
     // a campaign's first touch is still written as plain text.
     let mail = Mail {
@@ -4157,9 +5298,33 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         subject: &subject,
         text: &body,
         html: html.as_deref(),
-        thread: thread_ref.as_deref(),
+        thread,
+        reference: parent.as_deref(),
+        references: references.as_deref(),
+        message_id: Some(&ours),
     };
-    let mut access = access_token(st, account_id, &provider, false).await?;
+    // What a follow-up goes out with, written down before it goes rather than reconstructed
+    // afterwards: if a conversation still arrives as two emails, this line and the one below it
+    // say between them whether the headers were wrong or the id they name was never the one the
+    // first email left with.
+    if step > 0 {
+        log(
+            &st.db,
+            "info",
+            "followup_headers",
+            &format!(
+                "step {step} from={from} to={to} thread={} subject={subject:?} in-reply-to={} references={}",
+                thread.unwrap_or("-"),
+                parent.as_deref().map(angle).unwrap_or_else(|| "-".into()),
+                references
+                    .as_deref()
+                    .map(angle_chain)
+                    .filter(|chain| !chain.is_empty())
+                    .unwrap_or_else(|| "-".into()),
+            ),
+        )
+        .await;
+    }
     let response = match deliver(st, &provider, &access, &mail).await {
         Ok(response) => response,
         Err(e) if e == AUTH_EXPIRED => {
@@ -4168,23 +5333,32 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         }
         Err(e) => return Err(e),
     };
-    // The first email is the one that opens the thread; capture its reference so
-    // follow-ups can reply into it. Best effort: failure just leaves follow-ups
-    // unthreaded, it never blocks the send.
-    let captured = if step == 0 && thread_ref.is_none() {
-        thread_reference(st, &provider, &access, &response).await
-    } else {
-        None
-    };
-    // The conversation this step joined, so the reply it earns can be read against the
-    // step that prompted it. Gmail reports the thread on the send itself; Microsoft's
-    // sendMail returns nothing, so the reference the opening step captured stands in.
+    // What the provider made of it. Its own answer is the only one worth recording: a relay is
+    // allowed to rewrite the Message-ID it was handed, and a follow-up that answers an id nobody
+    // ever saw is a second conversation at the far end rather than a reply. The id we chose is
+    // left out of this on purpose — it is what we asked for, not what was sent.
+    let sent_refs = read_back_sent(st, &provider, &access, &response).await;
+    let sent_message_id = sent_refs.message_id.clone();
+    log(
+        &st.db,
+        "info",
+        "message_id_recorded",
+        &format!(
+            "{provider}: step {step} stored={} provider_reported={} ours={ours}",
+            sent_message_id.as_deref().unwrap_or("none"),
+            sent_refs.message_id.is_some(),
+        ),
+    )
+    .await;
+    // The conversation this step joined, so the reply it earns can be read against the step that
+    // prompted it. Gmail reports the thread on the send itself; Microsoft's sendMail reports
+    // nothing at all, so the message that just landed in Sent Items is read back for it.
     let thread_id = response["threadId"]
         .as_str()
         .map(str::to_string)
         .or_else(|| thread_ref.clone())
-        .or_else(|| captured.clone());
-    sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,to_email,provider_message_id,thread_id,subject,body,markdown,html,step_position,status,workspace_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'sent',?,?)")
+        .or_else(|| sent_refs.thread.clone());
+    sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,to_email,provider_message_id,thread_id,message_id,subject,body,markdown,html,step_position,status,workspace_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'sent',?,?)")
         .bind(id())
         .bind(jid)
         .bind(campaign)
@@ -4193,6 +5367,7 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
         .bind(&to)
         .bind(response["id"].as_str())
         .bind(&thread_id)
+        .bind(&sent_message_id)
         .bind(&subject)
         .bind(&body)
         .bind(&markdown_source)
@@ -4213,7 +5388,23 @@ async fn send_job(st: &AppState, jid: &str, payload: &str) -> Result<Option<Stri
             .map_err(err)?;
     }
     sqlx::query("UPDATE accounts SET sent_today=sent_today+1,health='healthy',last_health_at=?,updated_at=? WHERE id=?").bind(now()).bind(now()).bind(account_id).execute(&st.db).await.map_err(err)?;
-    Ok(captured)
+    campaign_event(
+        &st.db,
+        "sent",
+        campaign,
+        Some(lead_id),
+        Some(step),
+        &subject,
+        Some(json!({ "to": to })),
+    )
+    .await;
+    // The thread a follow-up continues. The first touch is the one that opens it, so that is the
+    // one worth handing back to be stored on the enrolment; a later step adds nothing to it.
+    if step == 0 {
+        Ok(thread_id.or(sent_refs.thread))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Answers inside the original conversation rather than starting a second thread with
@@ -4279,10 +5470,12 @@ async fn deliver_reply(
         .await?;
         return Ok(json!({}));
     }
+    // The same fetch the thread id comes from, asking for the one header a reply needs: the
+    // RFC Message-ID of the message being answered.
     let detail: Value = checked(
         st.http
             .get(format!(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{original}?format=minimal"
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{original}?format=metadata&metadataHeaders=Message-ID"
             ))
             .bearer_auth(access)
             .send()
@@ -4293,7 +5486,19 @@ async fn deliver_reply(
     .json()
     .await
     .map_err(err)?;
-    let mut request = json!({"raw": URL_SAFE_NO_PAD.encode(mime_message(mail))});
+    let reference = detail["payload"]["headers"]
+        .as_array()
+        .and_then(|headers| {
+            headers
+                .iter()
+                .find(|header| header["name"].as_str() == Some("Message-ID"))
+        })
+        .and_then(|header| header["value"].as_str());
+    let threaded = Mail {
+        reference,
+        ..*mail
+    };
+    let mut request = json!({"raw": URL_SAFE_NO_PAD.encode(mime_message(&threaded))});
     if let Some(thread) = detail["threadId"].as_str() {
         request["threadId"] = json!(thread);
     }
@@ -4462,6 +5667,12 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
         text: &text,
         html: (!html.is_empty()).then_some(html.as_str()),
         thread: None,
+        // A reply reaches the provider as a reply, which is what threads it there; a message
+        // written from scratch answers nothing, so it carries no reference either. Neither
+        // picks its own Message-ID: a hand-written message is not one a step has to answer.
+        reference: None,
+        references: None,
+        message_id: None,
     };
     // Refresh on expiry, and retry once with a forced refresh if the provider still
     // rejects the token — the same contract the campaign sender uses.
@@ -4705,34 +5916,206 @@ async fn schedule_single_followups(
     Ok(campaign)
 }
 
-/// The provider's reference for the thread an email opened, so follow-ups can join it.
-/// Gmail returns a thread id; Graph's sendMail returns no body, so the message just
-/// filed in Sent Items is read back for its RFC Message-ID.
-async fn thread_reference(
+/// What a provider says the message it just accepted actually was.
+struct SentRefs {
+    /// The provider's own name for the conversation: Gmail's thread id, Microsoft's conversation
+    /// id. The same idea under two names, and the one thing that never travels in the message.
+    thread: Option<String>,
+    /// The RFC 5322 Message-ID as the provider wrote it, in header form with its angle brackets.
+    /// Only ever the provider's own answer: an id we chose is not evidence of what left the
+    /// building.
+    message_id: Option<String>,
+}
+
+/// A provider read, as its JSON or the reason it failed. The reason is for the log — a Message-ID
+/// that cannot be read back does not stop a send, but it explains why a thread is being carried
+/// by the id we chose rather than by the provider's own.
+async fn read_json(request: reqwest::RequestBuilder) -> Result<Value> {
+    let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status();
+    match response.json::<Value>().await {
+        Ok(value) if status.is_success() => Ok(value),
+        Ok(value) => Err(format!(
+            "{status} {}",
+            provider_message(status, &value.to_string())
+        )),
+        Err(e) => Err(format!("{status} {e}")),
+    }
+}
+
+/// One line about a provider that would not say what it sent.
+async fn message_id_unreadable(st: &AppState, provider: &str, why: &str) {
+    log(
+        &st.db,
+        "warn",
+        "message_id_unreadable",
+        &format!("{provider}: {why}"),
+    )
+    .await;
+}
+
+/// Asks the provider what it actually sent. Gmail reports the id it assigned the message, which
+/// is then read for its `Message-ID` header. Graph's sendMail answers with nothing at all, so the
+/// message that just landed in Sent Items is read back for both of its ids.
+///
+/// Read back rather than assumed, because a relay is allowed to rewrite the Message-ID it was
+/// handed — the rewritten one is what the next step has to answer. Best effort throughout: what
+/// cannot be read is left empty, and the caller decides what stands in for it.
+async fn read_back_sent(
     st: &AppState,
     provider: &str,
     access: &str,
     response: &Value,
-) -> Option<String> {
-    if provider == "gmail" {
-        return response["threadId"].as_str().map(str::to_string);
+) -> SentRefs {
+    let mut thread = response["threadId"].as_str().map(str::to_string);
+    if provider != "gmail" {
+        let sent: Value = match read_json(
+            st.http
+                .get("https://graph.microsoft.com/v1.0/me/sentItems/messages?$top=1&$orderby=sentDateTime%20desc&$select=internetMessageId,conversationId")
+                .bearer_auth(access),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(why) => {
+                message_id_unreadable(st, provider, &why).await;
+                return SentRefs {
+                    thread,
+                    message_id: None,
+                };
+            }
+        };
+        let message = &sent["value"][0];
+        return SentRefs {
+            // The conversation, not the message: it is what the inbox sync files an answer under,
+            // so a reply to a campaign can be read back against the step that earned it.
+            thread: message["conversationId"]
+                .as_str()
+                .map(str::to_string)
+                .or(thread),
+            message_id: message["internetMessageId"]
+                .as_str()
+                .map(message_id)
+                .filter(|id| !id.is_empty())
+                .map(|id| angle(&id)),
+        };
     }
-    let sent: Value = st
-        .http
-        .get("https://graph.microsoft.com/v1.0/me/sentItems/messages?$top=1&$orderby=sentDateTime%20desc&$select=internetMessageId")
-        .bearer_auth(access)
-        .send()
+    let Some(accepted) = response["id"].as_str() else {
+        message_id_unreadable(st, provider, "the send came back without a message id").await;
+        return SentRefs {
+            thread,
+            message_id: None,
+        };
+    };
+    // Gmail's own record of the message it accepted, which is what the step after this has to
+    // answer. The header list first, because that is the small call; the message itself when the
+    // list comes back without the header, which is what left every send recorded under the id we
+    // chose rather than the one Gmail stamped on it.
+    let mut message_id = match read_json(
+        st.http
+            .get(format!(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages/{accepted}?format=metadata&metadataHeaders=Message-ID"
+            ))
+            .bearer_auth(access),
+    )
+    .await
+    {
+        Ok(read) => {
+            thread = read["threadId"].as_str().map(str::to_string).or(thread);
+            headers_message_id(&read["payload"]["headers"])
+        }
+        Err(why) => {
+            message_id_unreadable(st, provider, &format!("header list: {why}")).await;
+            None
+        }
+    };
+    if message_id.is_none() {
+        match read_json(
+            st.http
+                .get(format!(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/messages/{accepted}?format=raw"
+                ))
+                .bearer_auth(access),
+        )
         .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    sent["value"][0]["internetMessageId"]
-        .as_str()
-        .map(str::to_string)
+        {
+            Ok(read) => {
+                thread = read["threadId"].as_str().map(str::to_string).or(thread);
+                // Gmail returns unpadded base64url, but some servers pad it anyway.
+                message_id = read["raw"]
+                    .as_str()
+                    .and_then(|raw| URL_SAFE_NO_PAD.decode(raw.trim_end_matches('=')).ok())
+                    .and_then(|bytes| raw_message_id(&bytes));
+            }
+            Err(why) => message_id_unreadable(st, provider, &format!("message itself: {why}")).await,
+        }
+    }
+    if message_id.is_none() {
+        message_id_unreadable(
+            st,
+            provider,
+            "neither the header list nor the message itself carried a Message-ID",
+        )
+        .await;
+    }
+    SentRefs { thread, message_id }
 }
+
+/// What this lead has already been sent in this campaign, oldest first: the Message-ID a
+/// follow-up answers, and the whole chain behind it. `None` when there is nothing to answer,
+/// which is the one case a follow-up goes out unthreaded.
+async fn sent_chain(
+    db: &SqlitePool,
+    campaign_id: &str,
+    lead_id: &str,
+    step: i64,
+) -> Result<Option<(String, String)>> {
+    let rows = sqlx::query(
+        "SELECT message_id FROM send_logs WHERE campaign_id=? AND lead_id=? AND step_position<? \
+         AND status='sent' AND message_id IS NOT NULL ORDER BY step_position,created_at",
+    )
+    .bind(campaign_id)
+    .bind(lead_id)
+    .bind(step)
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    let chain: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get::<Option<String>, _>("message_id"))
+        .map(|id| message_id(&id))
+        .filter(|id| !id.is_empty())
+        .collect();
+    match chain.last() {
+        Some(parent) => Ok(Some((parent.clone(), chain.join(" ")))),
+        None => Ok(None),
+    }
+}
+
+/// The mailbox a lead's first email went out from, for the steps that have to follow it. A
+/// follow-up sent from another address is a new conversation at the other end whatever headers
+/// it carries, so the reply keeps the sender the lead has already heard from.
+async fn first_touch_account(
+    db: &SqlitePool,
+    campaign_id: &str,
+    lead_id: &str,
+    step: i64,
+) -> Result<Option<String>> {
+    if step <= 0 {
+        return Ok(None);
+    }
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT account_id FROM send_logs WHERE campaign_id=? AND lead_id=? AND step_position=0 \
+         AND status='sent' AND account_id IS NOT NULL ORDER BY created_at LIMIT 1",
+    )
+    .bind(campaign_id)
+    .bind(lead_id)
+    .fetch_optional(db)
+    .await
+    .map_err(err)
+    .map(Option::flatten)
+}
+
 fn extract_email(value: &str) -> String {
     let trimmed = value.trim();
     if let (Some(start), Some(end)) = (trimmed.find('<'), trimmed.find('>')) {
@@ -4741,6 +6124,31 @@ fn extract_email(value: &str) -> String {
         }
     }
     trimmed.to_lowercase()
+}
+
+/// What makes a message a report about a mailbox rather than a person answering. Read here,
+/// and again in the SQL that counts replies — `not_a_bounce_sql` builds that half from the same
+/// list — so the two can never disagree about what a bounce is.
+const BOUNCE_NEEDLES: [&str; 6] = [
+    "undeliverable",
+    "delivery status notification",
+    "mail delivery failed",
+    "address not found",
+    "mailbox full",
+    "550 ",
+];
+
+/// The needles above, as a predicate over an `inbox_messages` row aliased `m`: true when the
+/// message is not a bounce. SQL cannot call the classifier, and this is the one part of it the
+/// reply counts and the funnel need.
+fn not_a_bounce_sql() -> String {
+    BOUNCE_NEEDLES
+        .iter()
+        .map(|needle| {
+            format!("instr(lower(COALESCE(m.subject,'')||' '||COALESCE(m.raw_excerpt,'')),'{needle}')=0")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 /// Cheap keyword rules run before the model, per the classification pipeline.
@@ -4765,14 +6173,7 @@ fn rule_category(text: &str) -> Option<&'static str> {
     ]) {
         return Some("out_of_office");
     }
-    if has(&[
-        "undeliverable",
-        "delivery status notification",
-        "mail delivery failed",
-        "address not found",
-        "mailbox full",
-        "550 ",
-    ]) {
+    if has(&BOUNCE_NEEDLES) {
         return Some("bounce");
     }
     if has(&[
@@ -4996,8 +6397,9 @@ async fn store_message(
         .await
         .map_err(err)?
         .unwrap_or_else(|| DEFAULT_WORKSPACE.to_string());
+    let message_id = id();
     let inserted = sqlx::query("INSERT OR IGNORE INTO inbox_messages(id,account_id,provider_message_id,thread_id,from_email,subject,received_at,raw_excerpt,body_html,body_text,read_flag,ours,workspace_id) VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?)")
-        .bind(id())
+        .bind(&message_id)
         .bind(account_id)
         .bind(provider_message_id)
         .bind(thread)
@@ -5020,10 +6422,46 @@ async fn store_message(
         if !ours {
             // An out-of-office pauses rather than stops, and a bounce is a failed send
             // rather than an answer, so it stops the lead under its own rule.
-            match rule_category(&format!("{subject} {excerpt}")) {
+            let category = rule_category(&format!("{subject} {excerpt}"));
+            match category {
                 Some("out_of_office") => pause_lead_sequence(&st.db, &email, 3).await?,
                 Some("bounce") => stop_lead_sequence(&st.db, &email, "bounce").await?,
                 _ => stop_lead_sequence(&st.db, &email, "reply").await?,
+            }
+            // The campaign this answer belongs to, so its history reads the answer back. The
+            // step is the last one that actually went out, which is the message being answered
+            // and the same step the funnel credits the reply to.
+            let interrupted = sqlx::query("SELECT campaign_id,lead_id FROM campaign_leads WHERE thread_ref=?")
+                .bind(thread)
+                .fetch_all(&st.db)
+                .await
+                .map_err(err)?;
+            for row in &interrupted {
+                let campaign: String = row.get("campaign_id");
+                let lead_id: String = row.get("lead_id");
+                let sent_step: Option<i64> =
+                    sqlx::query_scalar("SELECT max(step_position) FROM send_logs WHERE campaign_id=? AND lead_id=?")
+                        .bind(&campaign)
+                        .bind(&lead_id)
+                        .fetch_optional(&st.db)
+                        .await
+                        .map_err(err)?
+                        .flatten();
+                campaign_event(
+                    &st.db,
+                    if category == Some("bounce") { "bounced" } else { "replied" },
+                    &campaign,
+                    Some(&lead_id),
+                    sent_step,
+                    subject,
+                    Some(json!({
+                        "positive": category == Some("interested"),
+                        "category": category,
+                        // So the feed's row can open the conversation it is about.
+                        "message_id": message_id,
+                    })),
+                )
+                .await;
             }
         }
         return Ok(1);
@@ -5462,7 +6900,13 @@ async fn sync_inbox(state: State<'_, AppState>, account_id: Option<String>) -> R
     // A poll and a click can land together; one waits rather than interleaving on the
     // same cursor.
     let _permit = state.sync.acquire().await.map_err(err)?;
-    sync_accounts(state.inner(), account_id.as_deref()).await
+    let added = sync_accounts(state.inner(), account_id.as_deref()).await?;
+    // The same signal the poller sends, so pressing Sync moves what has arrived into view
+    // everywhere it is shown rather than only in the list that was asked for it.
+    if added > 0 {
+        let _ = state.app.emit("inbox:new", added);
+    }
+    Ok(added)
 }
 
 /// Keeps the trail current without anyone pressing anything. A pass that is still running
@@ -5832,21 +7276,37 @@ async fn conversation(
 
 #[tauri::command]
 async fn inbox_thread(state: State<'_, AppState>, message_id: String) -> Result<Value> {
+    open_inbox_thread(&state.db, &message_id).await
+}
+
+/// One conversation as the reading pane shows it, against a pool so the rule below can be tested.
+///
+/// Opening a reply is reading it, so the row is marked seen here rather than left for the reader
+/// to say so afterwards. Every way into a conversation comes through this function — the Inbox, a
+/// notification, a campaign's leads tab — so none of them can forget, and the unread count and
+/// the notifications fall together as the conversation is opened. A notification that could not
+/// be cleared by reading it would say the same thing for ever.
+async fn open_inbox_thread(db: &SqlitePool, message_id: &str) -> Result<Value> {
     let message = sqlx::query("SELECT m.id,m.account_id,m.from_email,m.subject,m.received_at,m.raw_excerpt,m.body_html,m.body_text,m.thread_id,m.category,m.confidence,m.classified_by,m.channel_id,m.read_flag,m.archived,l.id AS lead_id,l.first_name,l.last_name,l.email AS lead_email,l.company,l.title,l.website FROM inbox_messages m LEFT JOIN leads l ON l.email=m.from_email WHERE m.id=?")
-        .bind(&message_id)
-        .fetch_optional(&state.db)
+        .bind(message_id)
+        .fetch_optional(db)
         .await
         .map_err(err)?
         .ok_or("Message not found")?;
+    if message.get::<i64, _>("read_flag") == 0 {
+        sqlx::query("UPDATE inbox_messages SET read_flag=1 WHERE id=?")
+            .bind(message_id)
+            .execute(db)
+            .await
+            .map_err(err)?;
+    }
     let email: Option<String> = message.get("from_email");
     let thread: Option<String> = message.get("thread_id");
     let account_id: String = message.get("account_id");
     // The whole exchange with this person, read against the message that is open, so
     // "what did Maily send and what came back" is one list rather than an inference.
     let conversation = match &email {
-        Some(address) => {
-            conversation(&state.db, &account_id, thread.as_deref(), address, &message_id).await?
-        }
+        Some(address) => conversation(db, &account_id, thread.as_deref(), address, message_id).await?,
         None => Vec::new(),
     };
     Ok(json!({
@@ -5863,7 +7323,8 @@ async fn inbox_thread(state: State<'_, AppState>, message_id: String) -> Result<
         "confidence": message.get::<Option<f64>,_>("confidence"),
         "classified_by": message.get::<Option<String>,_>("classified_by"),
         "channel_id": message.get::<Option<String>,_>("channel_id"),
-        "read": message.get::<i64,_>("read_flag") != 0,
+        // Marked seen just above, so it is read by the time this answers.
+        "read": true,
         "account_id": message.get::<Option<String>,_>("account_id"),
         // The lead's own columns, so the composer can fill {{variables}} from the same
         // values the campaign renderer would use.
@@ -5919,9 +7380,14 @@ async fn inbox_counts(state: State<'_, AppState>, account_id: Option<String>) ->
 /// single puts them there, so this reads the lead's single campaign.
 #[tauri::command]
 async fn thread_followups(state: State<'_, AppState>, message_id: String) -> Result<Value> {
+    followups_for_thread(&state.db, &message_id).await
+}
+
+/// The follow-ups hanging off one conversation, against a pool so what they report can be tested.
+async fn followups_for_thread(db: &SqlitePool, message_id: &str) -> Result<Value> {
     let email: Option<String> = sqlx::query_scalar("SELECT from_email FROM inbox_messages WHERE id=?")
-        .bind(&message_id)
-        .fetch_optional(&state.db)
+        .bind(message_id)
+        .fetch_optional(db)
         .await
         .map_err(err)?
         .flatten();
@@ -5931,15 +7397,20 @@ async fn thread_followups(state: State<'_, AppState>, message_id: String) -> Res
         "SELECT c.id,c.status FROM campaigns c JOIN campaign_leads cl ON cl.campaign_id=c.id JOIN leads l ON l.id=cl.lead_id WHERE c.kind='single' AND l.email=? ORDER BY c.created_at DESC LIMIT 1",
     )
     .bind(&email)
-    .fetch_optional(&state.db)
+    .fetch_optional(db)
     .await
     .map_err(err)?;
     let Some(campaign) = campaign else { return Ok(empty) };
     let campaign_id: String = campaign.get("id");
     let status: String = campaign.get("status");
-    let rows = sqlx::query("SELECT s.id,s.position,s.delay_days,s.body_md,s.subject_override,s.status,s.scheduled_at,s.sent_at,cl.next_due_at FROM sequence_steps s LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id WHERE s.campaign_id=? ORDER BY s.position")
+    // A waiting step with no time stored is given the one its own rule produces, and given it to
+    // keep, so what is shown here is the time the scheduler will go by. The step's `scheduled_at`
+    // — the date its rule produced when it was written — is a record of when the step was made
+    // and is never offered as a time anything happens at.
+    resolve_due_times(db, &campaign_id).await?;
+    let rows = sqlx::query("SELECT s.id,s.position,s.delay_days,s.body_md,s.subject_override,s.status,s.sent_at,cl.next_due_at FROM sequence_steps s LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id WHERE s.campaign_id=? ORDER BY s.position")
         .bind(&campaign_id)
-        .fetch_all(&state.db)
+        .fetch_all(db)
         .await
         .map_err(err)?;
     let steps: Vec<Value> = rows
@@ -5952,7 +7423,6 @@ async fn thread_followups(state: State<'_, AppState>, message_id: String) -> Res
                 "body_md": r.get::<Option<String>,_>("body_md"),
                 "subject_override": r.get::<Option<String>,_>("subject_override"),
                 "status": r.get::<String,_>("status"),
-                "scheduled_at": r.get::<Option<String>,_>("scheduled_at"),
                 "sent_at": r.get::<Option<String>,_>("sent_at"),
                 "due_at": r.get::<Option<String>,_>("next_due_at"),
             })
@@ -5970,11 +7440,36 @@ async fn thread_followups(state: State<'_, AppState>, message_id: String) -> Res
 /// Everything still waiting to go out: one pending step against the lead it waits for.
 #[tauri::command]
 async fn list_scheduled(state: State<'_, AppState>, limit: Option<i64>) -> Result<Vec<Value>> {
-    let rows = sqlx::query("SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,s.scheduled_at,c.kind,c.name AS campaign,c.status AS campaign_status,l.email AS lead_email,l.first_name,l.company,cl.next_due_at FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position LEFT JOIN leads l ON l.id=cl.lead_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') ORDER BY COALESCE(cl.next_due_at, s.scheduled_at) ASC LIMIT ?")
-        .bind(limit.unwrap_or(200).clamp(1, 500))
-        .fetch_all(&state.db)
-        .await
-        .map_err(err)?;
+    scheduled_sends(&state.db, limit).await
+}
+
+/// The list itself, against a pool so what it reports can be tested.
+///
+/// Every time it reports is a time the scheduler will act on. A step with nothing due is reported
+/// with nothing due: its own `scheduled_at` is the date its rule produced when it was written,
+/// which says when the step was made rather than when anything happens, and reading it as a send
+/// time is how a follow-up written days ago comes to look like it is about to go.
+async fn scheduled_sends(db: &SqlitePool, limit: Option<i64>) -> Result<Vec<Value>> {
+    // Each campaign the list touches works its own due times out first, so a step whose lead has
+    // never been given one is reported with the time it will go rather than with none.
+    let campaigns = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT s.campaign_id FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused')",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
+    for campaign in &campaigns {
+        resolve_due_times(db, campaign).await?;
+    }
+    // Last first: a row with nothing due is one nothing is waiting to send, so it belongs under
+    // the rows that are actually going.
+    let rows = sqlx::query(
+        "SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,c.kind,c.name AS campaign,c.status AS campaign_status,l.email AS lead_email,l.first_name,l.company,cl.next_due_at FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position LEFT JOIN leads l ON l.id=cl.lead_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') ORDER BY (cl.next_due_at IS NULL) ASC, cl.next_due_at ASC, s.position ASC LIMIT ?",
+    )
+    .bind(limit.unwrap_or(200).clamp(1, 500))
+    .fetch_all(db)
+    .await
+    .map_err(err)?;
     Ok(rows
         .iter()
         .map(|r| {
@@ -5988,7 +7483,7 @@ async fn list_scheduled(state: State<'_, AppState>, limit: Option<i64>) -> Resul
                 "lead_email": r.get::<Option<String>,_>("lead_email"),
                 "lead_name": r.get::<Option<String>,_>("first_name"),
                 "company": r.get::<Option<String>,_>("company"),
-                "due_at": r.get::<Option<String>,_>("next_due_at").or_else(|| r.get::<Option<String>,_>("scheduled_at")),
+                "due_at": r.get::<Option<String>,_>("next_due_at"),
                 "body_md": r.get::<Option<String>,_>("body_md"),
             })
         })
@@ -6695,6 +8190,33 @@ async fn postmaster_report(
     }))
 }
 
+/// One line of a campaign's history. Written by the paths that make history — a send, a
+/// follow-up scheduled, an answer, a skip, a hand-send — so the Activity tab reads a campaign
+/// back in the order it happened rather than re-deriving it from five other tables. Best
+/// effort, like `log`: history that cannot be written must never fail the send it describes.
+async fn campaign_event(
+    db: &SqlitePool,
+    event_type: &str,
+    campaign_id: &str,
+    lead_id: Option<&str>,
+    step: Option<i64>,
+    detail: &str,
+    metadata: Option<Value>,
+) {
+    let _ = sqlx::query("INSERT INTO events(id,level,event_type,detail,created_at,workspace_id,campaign_id,lead_id,step_position,metadata) VALUES(?,'info',?,?,?,(SELECT COALESCE(workspace_id,'ws-default') FROM campaigns WHERE id=?),?,?,?,?)")
+        .bind(id())
+        .bind(event_type)
+        .bind(detail)
+        .bind(now())
+        .bind(campaign_id)
+        .bind(campaign_id)
+        .bind(lead_id)
+        .bind(step)
+        .bind(metadata.map(|value| value.to_string()))
+        .execute(db)
+        .await;
+}
+
 async fn log(db: &SqlitePool, level: &str, event: &str, detail: &str) {
     // Stamped with the workspace that was open, so the Home feed stays inside it.
     let _ = sqlx::query("INSERT INTO events(id,level,event_type,detail,created_at,workspace_id) VALUES(?,?,?,?,?,?)")
@@ -6716,12 +8238,29 @@ async fn scheduler(st: AppState) {
         }
     }
 }
+/// Windows is inside a move/size loop, so the user is dragging the window. Set by the
+/// window procedure `constrain_maximize` installs. Both things `watch_native_frame` does
+/// when the window changes — re-stripping the frame, and rescuing a window that has ended up
+/// off-screen — move the window with `SetWindowPos`, and doing either of them mid-drag is
+/// what tore the window in half when it was dragged onto a display with a different scale.
+#[cfg(windows)]
+static IN_MOVE_LOOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// tao currently gives top-level windows `WS_CAPTION` even when decorations are
 /// disabled (tauri-apps/tao#1106), so the native title/control bar stays visible.
 /// Strip the frame styles once the window exists; `WS_THICKFRAME` is kept so the
 /// window can still be resized.
 #[cfg(windows)]
 fn strip_native_frame(window: &tauri::WebviewWindow) {
+    if let Ok(handle) = window.hwnd() {
+        strip_frame(handle.0);
+    }
+}
+
+/// The same strip on a raw handle. The window procedure has no `WebviewWindow` to hand, and
+/// calls this the moment a move loop ends, so a caption tao put back cannot outlive the drag.
+#[cfg(windows)]
+fn strip_frame(hwnd: *mut std::ffi::c_void) {
     use std::ffi::c_void;
 
     #[link(name = "user32")]
@@ -6752,10 +8291,6 @@ fn strip_native_frame(window: &tauri::WebviewWindow) {
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_FRAMECHANGED: u32 = 0x0020;
 
-    let Ok(handle) = window.hwnd() else {
-        return;
-    };
-    let hwnd = handle.0 as *mut c_void;
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         // Guard the re-application (see `watch_native_frame`): when the caption
@@ -6786,27 +8321,32 @@ fn strip_native_frame(window: &tauri::WebviewWindow) {
 /// window runs `SetWindowPos`, which reintroduces it). Re-strip whenever the
 /// window changes; `strip_native_frame` is a no-op once the frame is gone.
 ///
-/// Two guards, both learned from the window vanishing when dragged to a second
-/// monitor: the frame re-strip must not run inside the scale-factor notification
-/// (re-entering the OS DPI handling with a `SetWindowPos` can strand the window
-/// off-screen), and a borderless window left wholly outside every display has to be
-/// rescued, since it is otherwise invisible until the app restarts.
+/// Three guards, all learned from dragging the window onto a second monitor. A move loop is
+/// the user dragging: re-stripping the frame and rescuing the window both move it, and doing
+/// either inside the loop fights the drag and can leave the window torn in half. A scale
+/// change is the window crossing onto a display with a different scale factor, and tao is
+/// repositioning it as the notification arrives — so the rect read here is mid-flight and
+/// can intersect no display at all for a moment, which is exactly when the rescue used to
+/// fire and haul the window back to the primary monitor. What is left is a window that has
+/// genuinely ended up wholly outside every display, which does need rescuing, because a
+/// borderless window is otherwise invisible until the app restarts.
 #[cfg(windows)]
 fn watch_native_frame(window: &tauri::WebviewWindow, log: Option<std::path::PathBuf>) {
+    use std::sync::atomic::Ordering;
+
     strip_native_frame(window);
     let handle = window.clone();
     let log = Arc::new(log);
     window.on_window_event(move |event| {
-        let scale_changed = matches!(event, tauri::WindowEvent::ScaleFactorChanged { .. });
-        if !scale_changed {
-            strip_native_frame(&handle);
-        }
-        if scale_changed {
+        if matches!(event, tauri::WindowEvent::ScaleFactorChanged { .. }) {
             window_log(&log, "scale factor changed");
+            return;
         }
-        if (scale_changed || matches!(event, tauri::WindowEvent::Moved(_)))
-            && ensure_on_screen(&handle)
-        {
+        if IN_MOVE_LOOP.load(Ordering::Relaxed) {
+            return;
+        }
+        strip_native_frame(&handle);
+        if matches!(event, tauri::WindowEvent::Moved(_)) && ensure_on_screen(&handle) {
             window_log(&log, "window was off-screen; re-centred");
         }
     });
@@ -6825,9 +8365,15 @@ fn window_log(path: &Option<std::path::PathBuf>, line: &str) {
     }
 }
 
-/// Re-centres the window on the primary work area and reports whether it had to.
-/// `MonitorFromWindow(MONITOR_DEFAULTTONULL)` is null only when the window overlaps
-/// no display at all, so a legitimate drag across the seam is never interrupted.
+/// Puts the window back on a display when it has ended up wholly outside every one, and
+/// reports whether it had to. `MonitorFromWindow(MONITOR_DEFAULTTONULL)` is null only when
+/// the window overlaps no display at all, so a legitimate drag across the seam is not
+/// interrupted.
+///
+/// It is centred on the *nearest* display rather than the primary one. The primary's work
+/// area is the wrong answer for a window sitting beside a second monitor, and sending it
+/// there is what made a drag onto that monitor look like the window being dragged away from
+/// the cursor.
 #[cfg(windows)]
 fn ensure_on_screen(window: &tauri::WebviewWindow) -> bool {
     use std::ffi::c_void;
@@ -6841,9 +8387,19 @@ fn ensure_on_screen(window: &tauri::WebviewWindow) -> bool {
         bottom: i32,
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct MonitorInfo {
+        cb_size: u32,
+        rc_monitor: Rect,
+        rc_work: Rect,
+        flags: u32,
+    }
+
     #[link(name = "user32")]
     unsafe extern "system" {
         fn MonitorFromWindow(hwnd: *mut c_void, flags: u32) -> *mut c_void;
+        fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfo) -> i32;
         fn GetWindowRect(hwnd: *mut c_void, rect: *mut Rect) -> i32;
         fn SetWindowPos(
             hwnd: *mut c_void,
@@ -6854,11 +8410,10 @@ fn ensure_on_screen(window: &tauri::WebviewWindow) -> bool {
             cy: i32,
             flags: u32,
         ) -> i32;
-        fn SystemParametersInfoW(action: u32, param: u32, data: *mut c_void, winini: u32) -> i32;
     }
 
     const MONITOR_DEFAULTTONULL: u32 = 0;
-    const SPI_GETWORKAREA: u32 = 0x0030;
+    const MONITOR_DEFAULTTONEAREST: u32 = 2;
     const SWP_NOZORDER: u32 = 0x0004;
     const SWP_NOACTIVATE: u32 = 0x0010;
 
@@ -6874,25 +8429,34 @@ fn ensure_on_screen(window: &tauri::WebviewWindow) -> bool {
         if GetWindowRect(hwnd, &mut rect) == 0 {
             return false;
         }
-        let width = rect.right - rect.left;
-        let height = rect.bottom - rect.top;
-        let mut work = Rect::default();
-        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut _ as *mut c_void, 0) == 0 {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
             return false;
         }
+        let mut info = MonitorInfo {
+            cb_size: std::mem::size_of::<MonitorInfo>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return false;
+        }
+        let work = info.rc_work;
         let work_w = work.right - work.left;
         let work_h = work.bottom - work.top;
-        let w = width.clamp(0, work_w);
-        let h = height.clamp(0, work_h);
-        let x = work.left + (work_w - w) / 2;
-        let y = work.top + (work_h - h) / 2;
+        if work_w <= 0 || work_h <= 0 {
+            return false;
+        }
+        let width = (rect.right - rect.left).clamp(0, work_w);
+        let height = (rect.bottom - rect.top).clamp(0, work_h);
+        let x = work.left + (work_w - width) / 2;
+        let y = work.top + (work_h - height) / 2;
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
             x,
             y,
-            w,
-            h,
+            width,
+            height,
             SWP_NOZORDER | SWP_NOACTIVATE,
         );
         true
@@ -7062,6 +8626,8 @@ fn constrain_maximize(window: &tauri::WebviewWindow) {
     }
 
     const GWLP_WNDPROC: i32 = -4;
+    const WM_ENTERSIZEMOVE: u32 = 0x0231;
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
     const WM_GETMINMAXINFO: u32 = 0x0024;
     const MONITOR_DEFAULTTONEAREST: u32 = 2;
 
@@ -7078,6 +8644,15 @@ fn constrain_maximize(window: &tauri::WebviewWindow) {
         } else {
             unsafe { CallWindowProcW(prev, hwnd, msg, wparam, lparam) }
         };
+        // Track the drag, so nothing else in this module moves the window while the user is
+        // still holding it. The frame is re-stripped as the loop closes, because tao may have
+        // put the caption back and no further window event is guaranteed to come along.
+        if msg == WM_ENTERSIZEMOVE {
+            IN_MOVE_LOOP.store(true, Ordering::Relaxed);
+        } else if msg == WM_EXITSIZEMOVE {
+            IN_MOVE_LOOP.store(false, Ordering::Relaxed);
+            strip_frame(hwnd);
+        }
         if msg == WM_GETMINMAXINFO && lparam != 0 {
             let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
             if !monitor.is_null() {
@@ -7324,6 +8899,10 @@ fn main() {
             export_campaign_csv,
             message_variables,
             campaign_lead_action,
+            campaign_followups,
+            campaign_followup_send_now,
+            campaign_activity,
+            campaign_series,
             save_knowledge,
             delete_knowledge,
             list_knowledge,
@@ -7383,8 +8962,1102 @@ fn main() {
             list_workspaces,
             create_workspace,
             rename_workspace,
-            switch_workspace
+            switch_workspace,
+            clean_workspace
         ])
         .run(tauri::generate_context!())
         .expect("tauri error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A message with one id it answers and, when given, the chain of ids behind it.
+    fn mail<'a>(subject: &'a str, reference: Option<&'a str>) -> Mail<'a> {
+        chained(subject, reference, None)
+    }
+
+    fn chained<'a>(
+        subject: &'a str,
+        reference: Option<&'a str>,
+        references: Option<&'a str>,
+    ) -> Mail<'a> {
+        Mail {
+            from: "ari@layur.run",
+            to: "lead@acme.test",
+            cc: "",
+            bcc: "",
+            subject,
+            text: "hello",
+            html: None,
+            thread: None,
+            reference,
+            references,
+            message_id: None,
+        }
+    }
+
+    /// The reply headers are the only part of a follow-up's threading that reaches the far
+    /// end — Gmail's thread id stays inside Google — so they have to be in the raw message,
+    /// and wrapped in exactly one pair of brackets.
+    #[test]
+    fn a_reply_carries_the_headers_that_thread_it() {
+        let raw = mime_message(&mail("Re: ok", Some("<CAF1@mail.gmail.com>")));
+        assert!(raw.contains("In-Reply-To: <CAF1@mail.gmail.com>\r\n"), "{raw}");
+        assert!(raw.contains("References: <CAF1@mail.gmail.com>\r\n"), "{raw}");
+        assert!(!raw.contains("<<"), "{raw}");
+    }
+
+    /// A follow-up answers the message before it and carries the whole conversation behind it,
+    /// oldest first, each in its own pair of brackets: the list is what a client rebuilds the
+    /// thread from, and what makes the send a reply rather than a new email.
+    #[test]
+    fn a_follow_up_answers_the_chain_it_was_sent_into() {
+        let mail = chained(
+            "Re: ok",
+            Some("caf2@mail.gmail.com"),
+            Some("caf1@mail.gmail.com caf2@mail.gmail.com"),
+        );
+        let raw = mime_message(&mail);
+        assert!(raw.contains("In-Reply-To: <caf2@mail.gmail.com>\r\n"), "{raw}");
+        assert!(
+            raw.contains("References: <caf1@mail.gmail.com> <caf2@mail.gmail.com>\r\n"),
+            "{raw}"
+        );
+        assert!(!raw.contains("<<"), "{raw}");
+        // The subject the sender wrote it with, whatever shape it arrived in.
+        assert_eq!(reply_subject("ok"), "Re: ok");
+        assert_eq!(reply_subject("Re: ok"), "Re: ok");
+        assert_eq!(reply_subject("RE: re: ok"), "Re: ok");
+        assert_eq!(reply_subject("  Re:  ok  "), "Re: ok");
+    }
+
+    /// The request a follow-up actually goes out in, asserted as the provider receives it: the
+    /// stored Message-ID in header form with exactly one pair of brackets, the thread Gmail named
+    /// alongside it, and never the provider's own internal id — which no recipient's client has
+    /// ever seen and which threads nothing at all.
+    #[tokio::test]
+    async fn a_follow_up_asks_with_the_id_on_record() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "queued").await;
+        // Two shapes on record: the header form a send writes now, and the bare form the sends
+        // before it wrote. Both have to come out as exactly one pair of brackets.
+        sent_with_id(&pool, &campaign, &lead, 0, "<CAF1@mail.gmail.com>").await;
+        sent_with_id(&pool, &campaign, &lead, 1, "caf2@mail.gmail.com").await;
+        // What the provider calls the message it accepted. An id, but not a Message-ID: nothing a
+        // client threads a conversation by, and nothing that may end up in these headers.
+        sqlx::query("UPDATE send_logs SET provider_message_id='17c3f0a1b2d3e4f5' WHERE campaign_id=? AND lead_id=?")
+            .bind(&campaign)
+            .bind(&lead)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let (parent, chain) = sent_chain(&pool, &campaign, &lead, 2).await.unwrap().unwrap();
+        assert_eq!(parent, "caf2@mail.gmail.com");
+        let ours = "<a4f1@layur.run>";
+        let mut mail = chained("Re: ok", Some(&parent), Some(&chain));
+        mail.thread = Some("1a1ee9dbfadeabcd");
+        mail.message_id = Some(ours);
+
+        // Gmail is handed the message itself, and the thread to file it into.
+        let body = gmail_body(&mail);
+        assert_eq!(body["threadId"], json!("1a1ee9dbfadeabcd"), "{body}");
+        let raw = String::from_utf8(
+            URL_SAFE_NO_PAD
+                .decode(body["raw"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            raw.contains("In-Reply-To: <caf2@mail.gmail.com>\r\n"),
+            "{raw}"
+        );
+        // Oldest first, each in its own pair, in the case they were stored under.
+        assert!(
+            raw.contains("References: <CAF1@mail.gmail.com> <caf2@mail.gmail.com>\r\n"),
+            "{raw}"
+        );
+        assert!(!raw.contains("<<"), "{raw}");
+        // The id we choose goes out as the message's own, and the provider is asked afterwards
+        // what became of it — it is never what this step answers.
+        assert!(raw.contains(&format!("Message-ID: {ours}\r\n")), "{raw}");
+        assert!(!raw.contains(&format!("In-Reply-To: {ours}")), "{raw}");
+        assert!(!raw.contains("17c3f0a1b2d3e4f5"), "{raw}");
+
+        // Microsoft is handed a document rather than a message, so the same ids arrive by name.
+        let graph = graph_body(&mail);
+        let headers = graph["message"]["internetMessageHeaders"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let named = |name: &str| {
+            headers
+                .iter()
+                .find(|header| header["name"] == json!(name))
+                .and_then(|header| header["value"].as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(named("In-Reply-To").as_deref(), Some("<caf2@mail.gmail.com>"));
+        assert_eq!(
+            named("References").as_deref(),
+            Some("<CAF1@mail.gmail.com> <caf2@mail.gmail.com>")
+        );
+        let document = graph.to_string();
+        assert!(!document.contains("17c3f0a1b2d3e4f5"), "{document}");
+    }
+
+    /// What is stored is what the provider reports, in header form — whatever case it wrote the
+    /// header name in, and read from the message itself when the header list comes back without
+    /// it. A follow-up answers this id, so an id read wrongly here is a conversation arriving in
+    /// two pieces at the far end.
+    #[test]
+    fn the_id_a_provider_reports_is_the_one_that_is_stored() {
+        let headers = json!([
+            {"name": "From", "value": "ari@layur.run"},
+            {"name": "Message-Id", "value": "<CAF1@mail.gmail.com>"}
+        ]);
+        assert_eq!(
+            headers_message_id(&headers),
+            Some("<CAF1@mail.gmail.com>".to_string())
+        );
+        // A list with no Message-ID, and one whose only id is the provider's own internal name for
+        // the message rather than anything a client threads by.
+        assert_eq!(
+            headers_message_id(&json!([{"name": "Subject", "value": "ok"}])),
+            None
+        );
+        assert_eq!(
+            headers_message_id(&json!([{"name": "X-Gm-Message-State", "value": "17c3f0a1b2d3e4f5"}])),
+            None
+        );
+        // Read out of the message itself when the header list will not say, from the header block
+        // only: a body quoting the words is not the header, and the first blank line ends it.
+        let raw = b"Received: from mail.gmail.com\r\nMessage-ID: <CAF2@mail.gmail.com>\r\nSubject: Re: ok\r\n\r\nMessage-ID: <not-a-header@fake.test>\r\n";
+        assert_eq!(
+            raw_message_id(raw),
+            Some("<CAF2@mail.gmail.com>".to_string())
+        );
+        assert_eq!(
+            raw_message_id(b"From: a@b.test\r\n\r\nMessage-ID: <not-a-header@fake.test>\r\n"),
+            None
+        );
+        // Bracketed already or not, the stored form is one pair and never a stack of them.
+        assert_eq!(
+            headers_message_id(&json!([{"name": "Message-ID", "value": "x@y.test"}])),
+            Some("<x@y.test>".to_string())
+        );
+        assert_eq!(
+            headers_message_id(&json!([{"name": "Message-ID", "value": "<x@y.test>"}])),
+            Some("<x@y.test>".to_string())
+        );
+    }
+
+    #[test]
+    fn a_first_touch_answers_nothing() {
+        let raw = mime_message(&mail("ok", None));
+        assert!(!raw.contains("In-Reply-To"), "{raw}");
+        assert!(!raw.contains("References"), "{raw}");
+        // A first touch keeps the subject it was written with; `Re:` is a follow-up's mark.
+        assert!(raw.contains("Subject: ok\r\n"), "{raw}");
+    }
+
+    /// The id a message leaves with is one we chose, at the sender's own domain, in the shape the
+    /// RFC asks for. That is what the step after it answers: the provider is asked for its own
+    /// afterwards, but a provider that will not say leaves the conversation intact rather than
+    /// without an id at all.
+    #[test]
+    fn a_message_leaves_with_an_id_of_our_own() {
+        let ours = make_message_id("Ari <ari@layur.run>");
+        assert!(ours.starts_with('<') && ours.ends_with('>'), "{ours}");
+        assert!(ours.contains("@layur.run>"), "{ours}");
+        assert_eq!(ours.matches('@').count(), 1, "{ours}");
+        assert_eq!(message_id(&ours).matches('@').count(), 1, "{ours}");
+        // An address that says no domain worth using still leaves a well-formed id behind.
+        assert!(make_message_id("ari@localhost").contains("@maily.local>"));
+
+        let mut outgoing = chained("ok", None, None);
+        outgoing.message_id = Some(&ours);
+        let raw = mime_message(&outgoing);
+        assert!(raw.contains(&format!("Message-ID: {ours}\r\n")), "{raw}");
+        // And an id on its own threads nothing: it is what the *next* message answers.
+        assert!(!raw.contains("In-Reply-To"), "{raw}");
+    }
+
+    #[test]
+    fn a_message_id_is_an_id_whatever_shape_it_arrives_in() {
+        assert_eq!(message_id("<abc@x>"), "abc@x");
+        assert_eq!(message_id("abc@x"), "abc@x");
+        assert_eq!(message_id("  <abc@x>  "), "abc@x");
+    }
+
+    /// The subject the panel shows for a waiting step is the one the sender will use: a
+    /// follow-up wears the first email's line with one `Re:`, and the line this lead's variant
+    /// was given rather than the campaign's first one.
+    #[test]
+    fn the_panel_writes_the_subject_the_sender_will_use() {
+        // A first touch: its own line, else the variant this lead was given, else the campaign's.
+        assert_eq!(waiting_subject(0, None, None, None, "ok"), "ok");
+        assert_eq!(waiting_subject(0, None, Some("nokay"), None, "ok"), "nokay");
+        assert_eq!(waiting_subject(0, Some("written"), Some("nokay"), None, "ok"), "written");
+        // A follow-up: the line written on its step, else what this lead was sent, with one Re:.
+        assert_eq!(waiting_subject(1, None, Some("nokay"), Some("nokay"), "ok"), "Re: nokay");
+        assert_eq!(waiting_subject(1, None, None, None, "ok"), "Re: ok");
+        assert_eq!(waiting_subject(1, Some("Re: nokay"), None, Some("nokay"), "ok"), "Re: nokay");
+    }
+
+    /// The chain a follow-up answers is built from what has already gone out to that lead, oldest
+    /// first, and never from anything after it or belonging to somebody else.
+    #[tokio::test]
+    async fn a_follow_up_answers_the_ids_sent_before_it() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        let other = another_lead(&pool, &campaign).await;
+
+        // Nothing on record yet: no chain, and the send goes out as a plain email.
+        assert!(sent_chain(&pool, &campaign, &lead, 1).await.unwrap().is_none());
+
+        sent_with_id(&pool, &campaign, &lead, 0, "caf1@mail.gmail.com").await;
+        sent_with_id(&pool, &campaign, &other, 0, "caf9@mail.gmail.com").await;
+        assert_eq!(
+            sent_chain(&pool, &campaign, &lead, 1).await.unwrap(),
+            Some(("caf1@mail.gmail.com".to_string(), "caf1@mail.gmail.com".to_string())),
+            "the first email is what a follow-up answers"
+        );
+
+        sent_with_id(&pool, &campaign, &lead, 1, "caf2@mail.gmail.com").await;
+        let (parent, chain) = sent_chain(&pool, &campaign, &lead, 2).await.unwrap().unwrap();
+        assert_eq!(parent, "caf2@mail.gmail.com", "the one before it, not the first");
+        assert_eq!(chain, "caf1@mail.gmail.com caf2@mail.gmail.com", "oldest first");
+        // The lead's own thread only: another lead's send is not part of this one's chain.
+        assert!(!chain.contains("caf9"));
+    }
+
+    /// A follow-up is sent by the mailbox the first email was: a different address is a new
+    /// conversation at the other end, whatever headers travel with it.
+    #[tokio::test]
+    async fn a_follow_up_is_sent_by_the_mailbox_the_first_one_was() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        sent_with_id(&pool, &campaign, &lead, 0, "caf1@mail.gmail.com").await;
+        sqlx::query("UPDATE send_logs SET account_id='acct-one' WHERE campaign_id=? AND lead_id=?")
+            .bind(&campaign)
+            .bind(&lead)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first_touch_account(&pool, &campaign, &lead, 1).await.unwrap(),
+            Some("acct-one".to_string())
+        );
+        // A first touch is its own answer: the campaign's own account sends it.
+        assert_eq!(first_touch_account(&pool, &campaign, &lead, 0).await.unwrap(), None);
+    }
+
+    /// The schema the app runs against, in memory, so the scheduling rules are exercised
+    /// against the real tables. One connection: a second would be a second empty database.
+    async fn schema() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool).await.unwrap();
+        pool
+    }
+
+    /// A campaign with one enrolled lead, in the state asked for, sitting on step 0.
+    async fn a_campaign(pool: &SqlitePool, state: &str) -> (String, String) {
+        let (campaign, lead) = (id(), id());
+        sqlx::query("INSERT INTO campaigns(id,name,status,created_at,updated_at) VALUES(?,'Test','active',?,?)")
+            .bind(&campaign)
+            .bind(now())
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO leads(id,email,status,created_at,updated_at) VALUES(?,?,'active',?,?)")
+            .bind(&lead)
+            .bind(format!("{lead}@acme.test"))
+            .bind(now())
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO campaign_leads(campaign_id,lead_id,state,step_position) VALUES(?,?,?,0)")
+            .bind(&campaign)
+            .bind(&lead)
+            .bind(state)
+            .execute(pool)
+            .await
+            .unwrap();
+        (campaign, lead)
+    }
+
+    async fn add_step(pool: &SqlitePool, campaign: &str, position: i64, delay_minutes: i64) {
+        sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,body_md,enabled) VALUES(?,?,?,?,'ok',1)")
+            .bind(id())
+            .bind(campaign)
+            .bind(position)
+            .bind(delay_minutes)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// How many rows a table holds for one workspace.
+    async fn rows_for(pool: &SqlitePool, table: &str, ws: &str) -> i64 {
+        sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM {table} WHERE workspace_id=?"
+        ))
+        .bind(ws)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Whether one message is still unread. Zero is unread, which is how it arrives.
+    async fn unread_flag(pool: &SqlitePool, id: &str) -> i64 {
+        sqlx::query_scalar("SELECT read_flag FROM inbox_messages WHERE id=?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// One of everything a workspace can hold: a campaign with a lead enrolled on it, a step, a
+    /// template, an answer in the inbox, a line of knowledge and a line of history.
+    async fn a_workspace_with_data(pool: &SqlitePool, ws: &str) -> (String, String) {
+        let campaign = id();
+        let lead = id();
+        sqlx::query("INSERT INTO campaigns(id,name,status,approved_at,created_at,updated_at,workspace_id) VALUES(?,'ok','active',?,?,?,?)")
+            .bind(&campaign)
+            .bind(now())
+            .bind(now())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO leads(id,email,status,created_at,updated_at,workspace_id) VALUES(?,?,'active',?,?,?)")
+            .bind(&lead)
+            .bind(format!("{lead}@acme.test"))
+            .bind(now())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO campaign_leads(campaign_id,lead_id,state,step_position) VALUES(?,?,'queued',0)")
+            .bind(&campaign)
+            .bind(&lead)
+            .execute(pool)
+            .await
+            .unwrap();
+        add_step(pool, &campaign, 1, 60).await;
+        sqlx::query("INSERT INTO templates(id,name,subject,body,created_at,updated_at,workspace_id) VALUES(?,'t','ok','body',?,?,?)")
+            .bind(id())
+            .bind(now())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_messages(id,account_id,provider_message_id,from_email,subject,received_at,ours,workspace_id) VALUES(?,'a1',?,'them@acme.test','Re: ok',?,0,?)")
+            .bind(id())
+            .bind(id())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO knowledge(id,category,title,content,approved,created_at,updated_at,workspace_id) VALUES(?,'c','t','x',1,?,?,?)")
+            .bind(id())
+            .bind(now())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO events(id,level,event_type,detail,created_at,workspace_id) VALUES(?,'info','sent','Re: ok',?,?)")
+            .bind(id())
+            .bind(now())
+            .bind(ws)
+            .execute(pool)
+            .await
+            .unwrap();
+        (campaign, lead)
+    }
+
+    /// A send of `step`, with the queued job it came from. The key is shaped the way the sender
+    /// shapes it, because that is the only thing tying a job to its campaign.
+    async fn a_queued_send(pool: &SqlitePool, ws: &str, campaign: &str, lead: &str, step: i64) -> String {
+        let job = id();
+        sqlx::query("INSERT INTO jobs(id,kind,state,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'send','queued',?,?,'{}',?,?)")
+            .bind(&job)
+            .bind(now())
+            .bind(format!("{campaign}:{lead}:step:{step}"))
+            .bind(now())
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,step_position,status,workspace_id,created_at) VALUES(?,?,?,?,?,'sent',?,?)")
+            .bind(id())
+            .bind(&job)
+            .bind(campaign)
+            .bind(lead)
+            .bind(step)
+            .bind(ws)
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        job
+    }
+
+    /// Cleaning a workspace takes that workspace and nothing else. The three things left standing
+    /// are the reasons a fresh start is not also a fresh start with Google, or with the people who
+    /// asked not to be written to.
+    #[tokio::test]
+    async fn cleaning_a_workspace_takes_its_data_and_leaves_the_rest() {
+        let pool = schema().await;
+        let (mine, my_lead) = a_workspace_with_data(&pool, DEFAULT_WORKSPACE).await;
+        let (theirs, their_lead) = a_workspace_with_data(&pool, "ws-two").await;
+        let my_job = a_queued_send(&pool, DEFAULT_WORKSPACE, &mine, &my_lead, 1).await;
+        let their_job = a_queued_send(&pool, "ws-two", &theirs, &their_lead, 1).await;
+        sqlx::query("INSERT INTO accounts(id,provider,email,workspace_id,created_at,updated_at) VALUES('acct','gmail','ari@layur.run',?,?,?)")
+            .bind(DEFAULT_WORKSPACE)
+            .bind(now())
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO suppressions(email,reason,created_at) VALUES('adam@acme.test','unsubscribed',?)")
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        wipe_workspace(&pool, DEFAULT_WORKSPACE).await.unwrap();
+
+        for table in [
+            "leads",
+            "campaigns",
+            "send_logs",
+            "templates",
+            "inbox_messages",
+            "knowledge",
+            "events",
+        ] {
+            assert_eq!(
+                rows_for(&pool, table, DEFAULT_WORKSPACE).await,
+                0,
+                "{table} should be empty in the cleaned workspace"
+            );
+            assert_eq!(
+                rows_for(&pool, table, "ws-two").await,
+                1,
+                "{table} belongs to the other workspace and should still be there"
+            );
+        }
+        // What hangs off a campaign rather than off a workspace goes with its campaign.
+        for (table, column) in [
+            ("campaign_leads", "campaign_id"),
+            ("sequence_steps", "campaign_id"),
+        ] {
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(&format!(
+                    "SELECT count(*) FROM {table} WHERE {column}=?"
+                ))
+                .bind(&mine)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                0,
+                "{table} should go with the campaign it belonged to"
+            );
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(&format!(
+                    "SELECT count(*) FROM {table} WHERE {column}=?"
+                ))
+                .bind(&theirs)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+                1,
+                "the other workspace's {table} is none of this cleanup's business"
+            );
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE id=?")
+                .bind(&my_job)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the cleaned workspace's queue should be empty"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE id=?")
+                .bind(&their_job)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "another workspace's queue should still be waiting"
+        );
+        // The deliberate survivors.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM accounts")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "the connected mailbox stays, so nobody has to consent to Google again"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM suppressions")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "who asked not to be written to is not a workspace's to forget"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM workspaces WHERE id=?")
+                .bind(DEFAULT_WORKSPACE)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "this empties a workspace, it does not delete it"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM agent_defs WHERE workspace_id=?")
+                .bind(DEFAULT_WORKSPACE)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            4,
+            "the agents themselves are configuration, not history"
+        );
+    }
+
+    /// Duplicating a campaign leaves a campaign that is actually there: its own copy of the steps
+    /// and the A/B subject lines, in the list, and going nowhere until it is launched.
+    ///
+    /// One value landing in the wrong column is the failure this guards against. An insert that is
+    /// out by one is not a slightly wrong copy — it is a command that fails every time it is used,
+    /// which looks exactly like a menu item that does nothing.
+    #[tokio::test]
+    async fn a_duplicated_campaign_is_there_with_its_sequence_and_a_fresh_audience() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "queued").await;
+        add_step(&pool, &campaign, 1, 60).await;
+        add_step(&pool, &campaign, 2, 120).await;
+        sqlx::query("INSERT INTO campaign_subjects(id,campaign_id,position,subject,created_at) VALUES(?,?,0,'first',?),(?,?,1,'second',?)")
+            .bind(id())
+            .bind(&campaign)
+            .bind(now())
+            .bind(id())
+            .bind(&campaign)
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let fresh = copy_campaign(&pool, &campaign).await.unwrap();
+        assert_ne!(fresh, campaign, "a copy is its own campaign");
+
+        let copy = sqlx::query("SELECT name,kind,status,mode,interval_minutes,workspace_id,(SELECT count(*) FROM campaign_leads cl WHERE cl.campaign_id=campaigns.id) AS leads FROM campaigns WHERE id=?")
+            .bind(&fresh)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(copy.get::<String, _>("name"), "Test (copy)");
+        assert_eq!(
+            copy.get::<String, _>("kind"),
+            "campaign",
+            "a copy is a campaign, not a single"
+        );
+        assert_eq!(
+            copy.get::<String, _>("mode"),
+            "draft",
+            "the mode is written as its own value, not as the name"
+        );
+        assert_eq!(
+            copy.get::<String, _>("status"),
+            "draft",
+            "a copy starts where it cannot send by itself"
+        );
+        assert_eq!(copy.get::<i64, _>("interval_minutes"), 5);
+        assert_eq!(copy.get::<String, _>("workspace_id"), DEFAULT_WORKSPACE);
+        assert_eq!(copy.get::<i64, _>("leads"), 0, "nobody is enrolled in a copy");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM campaign_leads WHERE campaign_id=? AND lead_id=?"
+            )
+            .bind(&fresh)
+            .bind(&lead)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+            "the lead it was copying for is not enrolled in the copy"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM campaign_leads WHERE campaign_id=?"
+            )
+            .bind(&campaign)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1,
+            "the campaign it came from keeps its own audience"
+        );
+        // The sequence and the A/B lines come across, and the original keeps its own.
+        for (table, expected) in [("sequence_steps", 2i64), ("campaign_subjects", 2i64)] {
+            for (whom, id) in [("the copy", &fresh), ("the original", &campaign)] {
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>(&format!(
+                        "SELECT count(*) FROM {table} WHERE campaign_id=?"
+                    ))
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                    expected,
+                    "{whom} should have its own {table}"
+                );
+            }
+        }
+        // In the list, which is the only part of this that is visible to whoever pressed it.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM campaigns WHERE id=? AND kind='campaign' AND workspace_id=?"
+            )
+            .bind(&fresh)
+            .bind(DEFAULT_WORKSPACE)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
+        // A campaign that is not there is an error rather than a copy of nothing.
+        assert!(copy_campaign(&pool, "no-such-campaign").await.is_err());
+    }
+
+    /// A step's own `scheduled_at` is the date its rule produced when it was written — when the
+    /// step was made, not when anything happens. What the views report is the due time the
+    /// scheduler will act on, and a step nothing is waiting on reports no time at all rather than
+    /// a date from days ago standing in for one.
+    #[tokio::test]
+    async fn a_scheduled_send_reports_a_due_time_and_never_the_date_it_was_written() {
+        let pool = schema().await;
+        let single = id();
+        let lead = id();
+        let message = id();
+        // Two days after the day it was written, as a follow-up in a single is.
+        let written = "2026-11-16T08:41:38+00:00";
+        sqlx::query("INSERT INTO campaigns(id,name,status,kind,approved_at,created_at,updated_at,workspace_id) VALUES(?,'hsrstack@gmail.com','active','single',?,?,?,?)")
+            .bind(&single)
+            .bind(now())
+            .bind(written)
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO leads(id,email,status,created_at,updated_at,workspace_id) VALUES(?,?,'active',?,?,?)")
+            .bind(&lead)
+            .bind("lead@acme.test")
+            .bind(now())
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_messages(id,account_id,provider_message_id,from_email,subject,received_at,ours,workspace_id) VALUES(?,'a1',?,'lead@acme.test','hi',?,0,?)")
+            .bind(&message)
+            .bind(id())
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for state in ["queued", "paused"] {
+            sqlx::query("DELETE FROM sequence_steps WHERE campaign_id=?").bind(&single).execute(&pool).await.unwrap();
+            sqlx::query("DELETE FROM campaign_leads WHERE campaign_id=?").bind(&single).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO campaign_leads(campaign_id,lead_id,state,step_position) VALUES(?,?,?,1)")
+                .bind(&single)
+                .bind(&lead)
+                .bind(state)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,delay_days,body_md,status,scheduled_at,enabled) VALUES(?,?,1,0,2,'ok','pending',?,1)")
+                .bind(id())
+                .bind(&single)
+                .bind(written)
+                .execute(&pool)
+                .await
+                .unwrap();
+            // The date the step was written with is on record the whole time.
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT scheduled_at FROM sequence_steps WHERE campaign_id=?")
+                    .bind(&single)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stored.as_deref(), Some(written));
+
+            let listed = scheduled_sends(&pool, None).await.unwrap();
+            assert_eq!(listed.len(), 1, "{listed:?}");
+            let due = listed[0]["due_at"].as_str().map(str::to_string);
+            let thread = followups_for_thread(&pool, &message).await.unwrap();
+            let steps = thread["steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 1);
+            assert!(
+                steps[0].get("scheduled_at").is_none(),
+                "the date it was written is not offered as a time to send at: {thread}"
+            );
+            assert_ne!(
+                due.as_deref(),
+                Some(written),
+                "a reported time is never the date the step was written"
+            );
+            if state == "queued" {
+                // Waiting: it gets the time its own rule produces, which is what the scheduler
+                // reads, rather than nothing and rather than a date from the past.
+                assert!(due.is_some(), "a step it is waiting on has a time: {listed:?}");
+                assert!(!steps[0]["due_at"].is_null(), "{thread}");
+            } else {
+                // Held at the lead: nothing is waiting on it, so nothing is reported as due.
+                assert!(due.is_none(), "nothing is waiting on this step: {listed:?}");
+                assert!(steps[0]["due_at"].is_null(), "{thread}");
+            }
+        }
+    }
+
+    /// Opening a reply marks it read, and the count the bell and the rail are drawn from falls
+    /// with it. Reading is what clears a notification: one that stayed unread however often it
+    /// was opened would go on being announced for ever.
+    #[tokio::test]
+    async fn opening_a_reply_marks_it_read() {
+        let pool = schema().await;
+        let message = id();
+        sqlx::query("INSERT INTO inbox_messages(id,account_id,provider_message_id,from_email,subject,received_at,read_flag,ours,workspace_id) VALUES(?,'a1',?,'lead@acme.test','Re: ok',?,0,0,?)")
+            .bind(&message)
+            .bind(id())
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(unread_flag(&pool, &message).await, 0, "it arrives unread");
+
+        let thread = open_inbox_thread(&pool, &message).await.unwrap();
+        assert_eq!(thread["read"], json!(true), "and answers as read");
+        assert_eq!(unread_flag(&pool, &message).await, 1, "opening it read it");
+
+        // What the bell's number and the rail's "New" are counted from.
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM inbox_messages WHERE workspace_id=? AND read_flag=0 AND ours=0 AND deleted_at IS NULL AND archived=0"
+            )
+            .bind(DEFAULT_WORKSPACE)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0,
+            "and it is no longer counted as new"
+        );
+        // A conversation that is not there is an error rather than an empty thread.
+        assert!(open_inbox_thread(&pool, "no-such-message").await.is_err());
+    }
+
+    async fn lead_state(pool: &SqlitePool, campaign: &str, lead: &str) -> (String, i64, Option<String>) {
+        let row = sqlx::query("SELECT state,step_position,next_due_at FROM campaign_leads WHERE campaign_id=? AND lead_id=?")
+            .bind(campaign)
+            .bind(lead)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (
+            row.get("state"),
+            row.get("step_position"),
+            row.get("next_due_at"),
+        )
+    }
+
+    /// The bug: a follow-up written after a campaign's leads had run out showed in the funnel
+    /// and in nobody's schedule, because only a send ever enrolled a lead for a step.
+    #[tokio::test]
+    async fn a_step_added_after_the_sequence_ran_out_takes_the_lead_back_on() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        add_step(&pool, &campaign, 1, 60).await;
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 1);
+        let (state, step, due) = lead_state(&pool, &campaign, &lead).await;
+        assert_eq!(state, "queued");
+        assert_eq!(step, 1);
+        assert!(
+            moment(due.as_deref().unwrap_or_default()).is_some(),
+            "a queued lead has a due time the scheduler can read: {due:?}"
+        );
+    }
+
+    /// Every edit autosaves, so this runs on each keystroke and must be idempotent.
+    #[tokio::test]
+    async fn running_it_again_changes_nothing() {
+        let pool = schema().await;
+        let (campaign, _) = a_campaign(&pool, "done").await;
+        add_step(&pool, &campaign, 1, 60).await;
+        reopen_finished(&pool, &campaign).await.unwrap();
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn nothing_after_the_last_step_leaves_a_finished_lead_alone() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 0);
+        assert_eq!(lead_state(&pool, &campaign, &lead).await.0, "done");
+    }
+
+    /// A lead that has answered is not written to again, so it is not scheduled either.
+    #[tokio::test]
+    async fn a_lead_that_answered_is_not_taken_back_on() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        add_step(&pool, &campaign, 1, 60).await;
+        sqlx::query("UPDATE campaign_leads SET thread_ref='t1' WHERE campaign_id=? AND lead_id=?")
+            .bind(&campaign)
+            .bind(&lead)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_messages(id,account_id,provider_message_id,thread_id,from_email,subject,received_at,ours) VALUES(?,'a1','m1','t1','them@acme.test','Re: ok',?,0)")
+            .bind(id())
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 0);
+        assert_eq!(lead_state(&pool, &campaign, &lead).await.0, "done");
+    }
+
+    #[tokio::test]
+    async fn a_suppressed_lead_is_not_taken_back_on() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        add_step(&pool, &campaign, 1, 60).await;
+        let email: String = sqlx::query_scalar("SELECT email FROM leads WHERE id=?")
+            .bind(&lead)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO suppressions(email,reason,created_at) VALUES(?,'unsubscribed',?)")
+            .bind(&email)
+            .bind(now())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 0);
+        assert_eq!(lead_state(&pool, &campaign, &lead).await.0, "done");
+    }
+
+    /// Skipped, replied-parked and failed leads are where someone put them, not waiting.
+    #[tokio::test]
+    async fn a_parked_lead_is_not_taken_back_on() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "paused").await;
+        add_step(&pool, &campaign, 1, 60).await;
+
+        assert_eq!(reopen_finished(&pool, &campaign).await.unwrap(), 0);
+        assert_eq!(lead_state(&pool, &campaign, &lead).await.0, "paused");
+    }
+
+    /// A send of `step` to one lead, with the job its log hangs off and the Message-ID the
+    /// provider came back with — the id the step after it answers.
+    async fn sent_with_id(
+        pool: &SqlitePool,
+        campaign: &str,
+        lead: &str,
+        step: i64,
+        message_id: &str,
+    ) {
+        let job = id();
+        sqlx::query("INSERT INTO jobs(id,kind,state,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'send','done',?,?,'{}',?,?)")
+            .bind(&job)
+            .bind(now())
+            .bind(&job)
+            .bind(now())
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO send_logs(id,job_id,campaign_id,lead_id,status,step_position,message_id,created_at) VALUES(?,?,?,?,'sent',?,?,?)")
+            .bind(id())
+            .bind(&job)
+            .bind(campaign)
+            .bind(lead)
+            .bind(step)
+            .bind(message_id)
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// The same, for tests that only care that something went out.
+    async fn sent(pool: &SqlitePool, campaign: &str, lead: &str, step: i64) {
+        sent_with_id(pool, campaign, lead, step, &format!("{lead}-{step}@campaign.test")).await;
+    }
+
+    /// A second lead on the campaign, so a campaign can have a real audience.
+    async fn another_lead(pool: &SqlitePool, campaign: &str) -> String {
+        let lead = id();
+        sqlx::query("INSERT INTO leads(id,email,status,created_at,updated_at) VALUES(?,?,'active',?,?)")
+            .bind(&lead)
+            .bind(format!("{lead}@acme.test"))
+            .bind(now())
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO campaign_leads(campaign_id,lead_id,state,step_position) VALUES(?,?,'done',0)")
+            .bind(campaign)
+            .bind(&lead)
+            .execute(pool)
+            .await
+            .unwrap();
+        lead
+    }
+
+    /// An answer from that lead, on the thread the campaign opened.
+    async fn answered(pool: &SqlitePool, campaign: &str, lead: &str, subject: &str) {
+        let thread = format!("thread-{lead}");
+        sqlx::query("UPDATE campaign_leads SET thread_ref=? WHERE campaign_id=? AND lead_id=?")
+            .bind(&thread)
+            .bind(campaign)
+            .bind(lead)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO inbox_messages(id,account_id,provider_message_id,thread_id,from_email,subject,received_at,ours) VALUES(?,'a1',?,?,?,?,?,0)")
+            .bind(id())
+            .bind(id())
+            .bind(&thread)
+            .bind(format!("{lead}@acme.test"))
+            .bind(subject)
+            .bind(now())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// The example the metrics were wrong about: two leads, each sent Email 1 and Follow-up 1,
+    /// both answering. Four emails went out and two leads were written to, so the rate is over
+    /// the two leads rather than the four emails.
+    #[tokio::test]
+    async fn metrics_count_leads_rather_than_emails() {
+        let pool = schema().await;
+        let (campaign, first) = a_campaign(&pool, "done").await;
+        let second = another_lead(&pool, &campaign).await;
+        for lead in [&first, &second] {
+            sent(&pool, &campaign, lead, 0).await;
+            sent(&pool, &campaign, lead, 1).await;
+            answered(&pool, &campaign, lead, "Re: ok").await;
+        }
+
+        let metrics = campaign_metrics(&pool, &campaign).await.unwrap();
+        assert_eq!(metrics["total"], 2, "two leads in the campaign");
+        assert_eq!(metrics["contacted"], 2, "two leads were written to");
+        assert_eq!(metrics["emails_sent"], 4, "four emails went out");
+        assert_eq!(metrics["replied"], 2, "both of them answered");
+        assert_eq!(metrics["reply_rate"], 100, "every lead written to answered");
+        assert_eq!(metrics["emails_per_reply"], 2.0);
+    }
+
+    /// The same lead answering twice answered once, and its second message is not a second lead
+    /// written to either.
+    #[tokio::test]
+    async fn a_lead_that_answers_twice_replies_once() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "done").await;
+        sent(&pool, &campaign, &lead, 0).await;
+        answered(&pool, &campaign, &lead, "Re: ok").await;
+        answered(&pool, &campaign, &lead, "Re: ok again").await;
+
+        let metrics = campaign_metrics(&pool, &campaign).await.unwrap();
+        assert_eq!(metrics["replied"], 1);
+        assert_eq!(metrics["reply_rate"], 100);
+        assert_eq!(metrics["emails_per_reply"], 1.0);
+    }
+
+    /// An audience nobody has written to has no rate rather than one made of nothing.
+    #[tokio::test]
+    async fn an_audience_with_nothing_sent_has_no_rate() {
+        let pool = schema().await;
+        let (campaign, _) = a_campaign(&pool, "queued").await;
+
+        let metrics = campaign_metrics(&pool, &campaign).await.unwrap();
+        assert_eq!(metrics["total"], 1);
+        assert_eq!(metrics["contacted"], 0);
+        assert_eq!(metrics["reply_rate"], 0);
+        assert_eq!(metrics["bounce_rate"], 0);
+        assert_eq!(metrics["unsubscribe_rate"], 0);
+        assert!(metrics["emails_per_reply"].is_null(), "no replies, no ratio");
+        assert_eq!(metrics["in_sequence"], 1, "still waiting its turn");
+        assert_eq!(metrics["finished"], 0);
+    }
+
+    /// A step counts the leads that reached it rather than the emails it carried, and the reply
+    /// belongs to the step that went out before it.
+    #[tokio::test]
+    async fn the_funnel_counts_leads_and_credits_the_step_that_earned_the_reply() {
+        let pool = schema().await;
+        let (campaign, first) = a_campaign(&pool, "done").await;
+        let second = another_lead(&pool, &campaign).await;
+        sent(&pool, &campaign, &first, 0).await;
+        sent(&pool, &campaign, &second, 0).await;
+        sent(&pool, &campaign, &first, 1).await;
+        answered(&pool, &campaign, &first, "Re: ok").await;
+
+        let metrics = campaign_metrics(&pool, &campaign).await.unwrap();
+        let funnel = metrics["funnel"].as_array().unwrap();
+        assert_eq!(funnel.len(), 2, "two steps exist");
+        assert_eq!(funnel[0]["leads"], 2, "both leads got the first email");
+        assert_eq!(funnel[0]["sent"], 2, "which was two emails");
+        assert_eq!(funnel[0]["replied"], 0);
+        assert_eq!(funnel[1]["leads"], 1, "one lead went further");
+        assert_eq!(funnel[1]["sent"], 1);
+        assert_eq!(funnel[1]["replied"], 1, "the follow-up earned the reply");
+    }
+
+    /// The claim Send now makes: the first caller takes the step, the second finds nothing to
+    /// take. A double click can never put two emails in the same thread.
+    #[tokio::test]
+    async fn a_waiting_step_can_only_be_claimed_once() {
+        let pool = schema().await;
+        let (campaign, lead) = a_campaign(&pool, "queued").await;
+
+        assert!(claim_followup(&pool, &campaign, &lead).await.unwrap());
+        assert!(
+            !claim_followup(&pool, &campaign, &lead).await.unwrap(),
+            "the second click has nothing to claim"
+        );
+        assert_eq!(lead_state(&pool, &campaign, &lead).await.0, "sending");
+    }
 }
