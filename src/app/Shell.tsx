@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
-import { createWorkspace, deleteCampaign, listAccounts, listAgents, listCampaigns, listChannels, listKnowledge, listLeads, listTemplates, listWorkspaces, renameWorkspace, saveCampaign, switchWorkspace } from "../lib/api";
-import type { Account, AgentDef, Campaign, KnowledgeEntry, Lead, Template, Workspace } from "../lib/types";
+import { createWorkspace, deleteCampaign, inboxCounts, listAccounts, listAgents, listCampaigns, listInbox, listKnowledge, listLeads, listTemplates, listWorkspaces, renameWorkspace, saveCampaign, switchWorkspace } from "../lib/api";
+import type { Account, AgentDef, Campaign, InboxMessage, KnowledgeEntry, Lead, Template, Workspace } from "../lib/types";
 import { Home } from "../pages/Home";
 import { Campaigns } from "../pages/Campaigns";
 import { Campaign as CampaignPage } from "../pages/Campaign";
@@ -85,6 +87,8 @@ export function Shell() {
   const [editingAgent, setEditingAgent] = useState<AgentDef | undefined>();
   const [editingLead, setEditingLead] = useState<Lead | undefined>();
   const [unread, setUnread] = useState(0);
+  /** What has arrived and not been read, newest first: the rows the bell's panel lists. */
+  const [arrived, setArrived] = useState<InboxMessage[]>([]);
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [mobile, setMobile] = useState(isNarrow);
   const [navOpen, setNavOpen] = useState(false);
@@ -95,6 +99,26 @@ export function Shell() {
   const tell = useCallback((message: string) => {
     setNote(message);
     setTimeout(() => setNote(""), 4000);
+  }, []);
+
+  /** What has come in and not been read: the bell's number, and the replies its panel lists.
+   *
+   *  One loader for both, because they are the same question asked twice and a panel that
+   *  disagreed with the number beside it would be worse than no panel. The count is the Inbox's
+   *  own — every unread message in the workspace, whether it was ever classified into a channel
+   *  or not, which is what the old sum over the channels quietly left out. Best effort: new mail
+   *  arriving is not worth a toast when the reading of it fails. */
+  const loadNotifications = useCallback(async () => {
+    try {
+      const [counts, unreadMail] = await Promise.all([
+        inboxCounts(),
+        listInbox("new", undefined, true, "newest"),
+      ]);
+      setUnread(counts.unread);
+      setArrived(unreadMail);
+    } catch {
+      /* notifications are best-effort */
+    }
   }, []);
 
   /** Moves to a page, appending it as a step and dropping anything ahead of it — the same
@@ -143,12 +167,7 @@ export function Shell() {
     } catch (e) {
       tell(String(e));
     }
-    try {
-      const channels = await listChannels();
-      setUnread(channels.reduce((sum, channel) => sum + channel.unread, 0));
-    } catch {
-      /* notifications are best-effort */
-    }
+    await loadNotifications();
   };
 
   const loadAccounts = useCallback(async () => {
@@ -199,6 +218,24 @@ export function Shell() {
     loadAccounts();
     loadWorkspaces();
   }, []);
+
+  // New mail arrives on its own — the poller behind the app is what finds it — so the bell hears
+  // about it from there rather than waiting for the next thing anyone clicks. The Inbox listens
+  // to the same signal for its own list.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const subscription = listen<number>("inbox:new", () => void loadNotifications());
+    return () => {
+      void subscription.then((off) => off());
+    };
+  }, [loadNotifications]);
+
+  // Reading a reply is what clears it, and the reading happens in the Inbox, which emits nothing
+  // of its own. So the bell is brought up to date when the page changes rather than left holding
+  // a number for something that has already been dealt with.
+  useEffect(() => {
+    void loadNotifications();
+  }, [page, loadNotifications]);
 
   // An account that has been disconnected must not leave the Inbox stuck on an empty
   // mailbox nothing can ever fill.
@@ -282,8 +319,15 @@ export function Shell() {
     setDrawer("lead");
   };
 
-  // Opening a campaign lands on its setup, never on the analytics view left open before.
-  const openCampaignEditor = (id: string) => go({ page: "Campaign", campaignId: id, tab: undefined });
+  // Opening a campaign lands on its setup, never on the analytics view left open before — so
+  // it says so rather than leaving the tab empty for the page to fill in from what it remembers.
+  const openCampaignEditor = (id: string) => go({ page: "Campaign", campaignId: id, tab: "sequence" });
+
+  // The sidebar's own list is how a running campaign is checked on rather than written, so it
+  // opens on what has happened to it. The other ways in — the campaigns page, Home, a campaign
+  // just created — still land on the setup, which is where something gets written.
+  const openCampaignActivity = (id: string) =>
+    go({ page: "Campaign", campaignId: id, tab: "activity" });
 
   const startNewCampaign = () => setNaming(true);
 
@@ -332,7 +376,7 @@ export function Shell() {
           favourites={favouriteCampaigns}
           onOpenFavourites={() => go({ page: "Campaigns" })}
           campaigns={campaigns}
-          onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
+          onOpenCampaign={(campaign) => openCampaignActivity(campaign.id)}
           onNewCampaign={startNewCampaign}
           workspace={workspace}
           activeCampaignId={page === "Campaign" ? editingCampaignId : undefined}
@@ -341,6 +385,10 @@ export function Shell() {
           open={navOpen}
           onClose={() => setNavOpen(false)}
           notifications={unread}
+          arrived={arrived}
+          // A notification opens the conversation it is about, where it is, rather than the Inbox
+          // at the top of a list: what arrived is the thing worth showing.
+          onOpenNotification={(messageId) => go({ page: "Inbox", messageId })}
         />
         {mobile && navOpen && <div className="app-scrim" onClick={() => setNavOpen(false)} />}
         {/* The Inbox owns its own full-height panes, so it takes the column without the
@@ -365,7 +413,9 @@ export function Shell() {
               onToggleFavourite={toggleFavourite}
               onOpenCampaign={(campaign) => openCampaignEditor(campaign.id)}
               onOpenAnalytics={(campaign) =>
-                go({ page: "Campaign", campaignId: campaign.id, tab: "activity" })
+                // The reading half of a campaign, which the page keeps three views of. It opens
+                // on the numbers; the other two are a click away and in the URL.
+                go({ page: "Campaign", campaignId: campaign.id, tab: "analytics" })
               }
               onDelete={removeCampaign}
               tell={tell}
@@ -430,6 +480,16 @@ export function Shell() {
               }}
               section={settingsTab}
               onAccountsChange={loadAccounts}
+              onWorkspaceCleaned={async () => {
+                // Everything the shell was holding for this workspace is gone: the list, the
+                // audience, and the counts the sidebar shows beside each workspace.
+                await load();
+                await loadWorkspaces();
+                // So is every page behind this one — a back step would land on a campaign that no
+                // longer exists — and the history starts again from here, where the result is.
+                setTrail([{ page: "Settings", settingsTab: "danger" }]);
+                setAt(0);
+              }}
             />
           )}
           {page === "Campaign" && editingCampaign && (
@@ -444,7 +504,7 @@ export function Shell() {
               onTab={(tab) => go({ page: "Campaign", tab })}
               onBackToCampaigns={() => go({ page: "Campaigns" })}
               onDeleted={() => go({ page: "Campaigns" })}
-              onDuplicated={(id) => go({ page: "Campaign", campaignId: id, tab: undefined })}
+              onDuplicated={(id) => go({ page: "Campaign", campaignId: id, tab: "sequence" })}
               onOpenThread={(messageId) => go({ page: "Inbox", messageId })}
             />
           )}

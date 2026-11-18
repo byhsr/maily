@@ -307,6 +307,84 @@ svg {
   padding: 0;
 }
 
+/* The notifications panel: what arrived, opened by the bell in the footer. The same panel,
+   scrim and dismissal as the workspace menu above it, opening upward because the bell is at the
+   bottom of the sidebar. */
+.notifwrap {
+  position: relative;
+}
+
+.notifmenu {
+  position: absolute;
+  bottom: calc(100% + var(--s1));
+  left: 0;
+  right: 0;
+  /* Above `.menuscrim` (10), which is this panel's own click-away layer. */
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  max-height: min(60vh, 420px);
+  padding: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--bg-card);
+  overflow: auto;
+}
+
+.notifmenu button {
+  width: 100%;
+  border: 0;
+  border-radius: var(--r-chip);
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.notifmenu button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* One reply: who it is from, what it says, and how long it has been sitting there. */
+.notifrow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s2);
+}
+
+.notifrow b,
+.notifrow span,
+.notifrow small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notifrow b {
+  font-size: var(--fs-13);
+  font-weight: 500;
+}
+
+.notifrow span {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.notifrow small {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* What the panel says before anything has arrived. */
+.notifblind {
+  display: block;
+  padding: var(--s2);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
 .sidebar.collapsed .wsmeta,
 .sidebar.collapsed .wsswitch > svg {
   display: none;

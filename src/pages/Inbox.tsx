@@ -264,6 +264,19 @@ export function Inbox({ tell, account, onAccount, initialMessageId }: InboxProps
     setWide(false);
   }, [selected]);
 
+  // Arriving with a conversation to open — from a notification, from a campaign's leads, or from
+  // anything else that links into one — shows it whatever the Inbox was filtered to. The message
+  // is the point, so the view, the channel and the search give way to it, which is also what puts
+  // it in the list beside the reader rather than open over a list it is not in.
+  useEffect(() => {
+    if (!initialMessageId) return;
+    setSelected(initialMessageId);
+    setView("inbox");
+    setChannelId(undefined);
+    setUnreadOnly(false);
+    setQuery("");
+  }, [initialMessageId]);
+
   // A reply opens above the message, so the pane goes back to the top with it — otherwise
   // the writer would still be looking at wherever they had scrolled to.
   useEffect(() => {

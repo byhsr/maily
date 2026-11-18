@@ -14,7 +14,8 @@ import {
   Star,
   Users,
 } from "lucide-react";
-import type { Account, Campaign, Workspace } from "../lib/types";
+import type { Account, Campaign, InboxMessage, Workspace } from "../lib/types";
+import { agoText } from "../lib/followups";
 import { Button } from "../ui/Button";
 
 const NAV = [
@@ -60,7 +61,12 @@ type SidebarProps = {
   mobile: boolean;
   open: boolean;
   onClose: () => void;
+  /** How many replies are waiting to be read. */
   notifications: number;
+  /** Those replies themselves, newest first, for the panel the bell opens. */
+  arrived: InboxMessage[];
+  /** Opens one of them where it is, rather than the Inbox at the top of a list. */
+  onOpenNotification: (messageId: string) => void;
 };
 
 export function Sidebar({
@@ -87,9 +93,12 @@ export function Sidebar({
   open,
   onClose,
   notifications,
+  arrived,
+  onOpenNotification,
 }: SidebarProps) {
   const rail = collapsed && !mobile;
   const [menu, setMenu] = useState(false);
+  const [bell, setBell] = useState(false);
   const active = page === "Campaign" ? "Campaigns" : page;
   const go = (target: string) => {
     onNavigate(target);
@@ -103,6 +112,17 @@ export function Sidebar({
     setMenu(false);
     action();
     if (mobile) onClose();
+  };
+  /** Away from the panel and into the conversation it named — or into the Inbox when it named
+   *  none, which is the whole of what the bell used to do. */
+  const openNotification = (messageId?: string) => {
+    setBell(false);
+    if (messageId) {
+      onOpenNotification(messageId);
+      if (mobile) onClose();
+      return;
+    }
+    go("Inbox");
   };
 
   return (
@@ -241,16 +261,52 @@ export function Sidebar({
 
       {/* ---- Bottom block ---- */}
       <div className="sidefoot">
-        <button
-          className={active === "Inbox" ? "navlink on" : "navlink"}
-          onClick={() => go("Inbox")}
-          title={rail ? "Notifications" : undefined}
-        >
-          <Bell />
-          <span>Notifications</span>
-          {notifications > 0 && <i className="navcount">{notifications}</i>}
-          {notifications > 0 && <i className="navdot" />}
-        </button>
+        {/* What arrived, rather than a number that leaves you to find it: the panel lists the
+            replies waiting to be read and opens the one that is picked. */}
+        <div className="notifwrap">
+          <button
+            className={active === "Inbox" ? "navlink on" : "navlink"}
+            onClick={() => (rail ? go("Inbox") : setBell((openBell) => !openBell))}
+            title={rail ? "Notifications" : undefined}
+          >
+            <Bell />
+            <span>Notifications</span>
+            {notifications > 0 && <i className="navcount">{notifications}</i>}
+            {notifications > 0 && <i className="navdot" />}
+          </button>
+
+          {bell && !rail && (
+            <>
+              <div className="menuscrim" onClick={() => setBell(false)} />
+              <div className="notifmenu" role="menu">
+                <span className="wsmenulabel">
+                  {notifications > 0
+                    ? `${notifications} waiting to be read`
+                    : "Nothing new"}
+                </span>
+                {arrived.slice(0, 6).map((item) => (
+                  <button
+                    key={item.id}
+                    className="notifrow"
+                    title={item.subject || undefined}
+                    onClick={() => openNotification(item.id)}
+                  >
+                    <b>{item.lead_name || item.from_email || "Unknown sender"}</b>
+                    <span>{item.subject || "(no subject)"}</span>
+                    <small>{agoText(item.received_at)}</small>
+                  </button>
+                ))}
+                {arrived.length === 0 && (
+                  <small className="notifblind">
+                    Anything that arrives unread is listed here, and waits in the Inbox.
+                  </small>
+                )}
+                <hr />
+                <button onClick={() => openNotification()}>Open inbox</button>
+              </div>
+            </>
+          )}
+        </div>
         <button
           className={page === "Settings" ? "navlink on" : "navlink"}
           onClick={onOpenSettings}
