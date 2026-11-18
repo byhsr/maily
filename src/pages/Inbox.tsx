@@ -854,8 +854,15 @@ export function Inbox({ tell, account, onAccount, initialMessageId }: InboxProps
                     </div>
                   ) : (
                     <>
+                      {/* When the scheduler will actually send it. A step with nothing due is
+                          not waiting on anything — it is not a step with a time from days ago,
+                          which is what reading its stored date as one used to say. */}
                       <span className="ghoststep-when">
-                        Follow-up {step.position} · scheduled {whenAt(step.due_at ?? step.scheduled_at)}
+                        {step.due_at
+                          ? `Follow-up ${step.position} · scheduled ${whenAt(step.due_at)}`
+                          : step.sent_at
+                            ? `Follow-up ${step.position} · sent ${whenAt(step.sent_at)}`
+                            : `Follow-up ${step.position} · not scheduled`}
                       </span>
                       <div className="ghoststep-actions">
                         <button type="button" className="linkback" onClick={() => beginEdit(step)}>

@@ -503,9 +503,9 @@ export type FollowupStep = {
   delay_days?: number | null;
   body_md?: string | null;
   subject_override?: string | null;
-  scheduled_at?: string | null;
   status: "pending" | "sent" | "skipped" | "cancelled" | "failed";
   sent_at?: string | null;
+  /** When the scheduler will send it, UTC. Empty when nothing is waiting on the step. */
   due_at?: string | null;
 };
 
