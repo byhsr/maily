@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AnimatePresence } from "motion/react";
 import { Check } from "lucide-react";
 import { createWorkspace, deleteCampaign, inboxCounts, listAccounts, listAgents, listCampaigns, listInbox, listKnowledge, listLeads, listTemplates, listWorkspaces, renameWorkspace, saveCampaign, switchWorkspace } from "../lib/api";
@@ -248,6 +249,25 @@ export function Shell() {
   useEffect(() => {
     document.documentElement.dataset.theme = "dark";
   }, []);
+
+  // Links belong to the reader's browser, not to us. A message's links are anchors inside
+  // rendered email, and following one in place would replace the app with a stranger's page —
+  // the webview has no address bar and no way back. Any anchor we render goes to the system
+  // opener instead. The handler is on the document, so it covers every page, drawer and
+  // preview without each one having to remember to intercept its own links.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const onClick = (event: MouseEvent) => {
+      const anchor = (event.target as Element | null)?.closest?.("a[href]");
+      if (!anchor) return;
+      const href = anchor.getAttribute("href") ?? "";
+      if (!/^(https?:|mailto:)/i.test(href)) return;
+      event.preventDefault();
+      void openUrl(href).catch((e) => tell(String(e)));
+    };
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, [tell]);
 
   useEffect(() => {
     try {

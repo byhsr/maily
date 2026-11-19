@@ -5697,6 +5697,18 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
         }
     }
     let response = delivered.ok_or("The message was not sent")?;
+    // A single that carries follow-ups is a conversation those follow-ups have to answer, so the
+    // email that just went out is asked of the provider for the id it actually left with. Only
+    // when something will follow it: a lone message nobody answers needs no id kept.
+    let list = input.followups.as_deref().unwrap_or_default();
+    let sent_refs = if list.is_empty() {
+        SentRefs {
+            thread: None,
+            message_id: None,
+        }
+    } else {
+        read_back_sent(state.inner(), &provider, &access, &response).await
+    };
     // send_logs.job_id is not nullable, so a hand-written send records a completed job of
     // its own. That also files it in the same history the thread view already reads.
     let lead_id = match input.lead_id.clone() {
@@ -5707,14 +5719,16 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
             .await
             .map_err(err)?,
     };
-    // The conversation the message landed in. A reply already knows it from the message
-    // it answers; otherwise Gmail reports it on the send. Microsoft's sendMail returns
-    // nothing, so a fresh Outlook message has no thread to record.
+    // The conversation the message landed in. A reply already knows it from the message it
+    // answers; otherwise Gmail reports it on the send and Microsoft's read-back names it.
     let thread_id = reply
         .as_ref()
         .and_then(|row| row.get::<Option<String>, _>("thread_id"))
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| response["threadId"].as_str().map(str::to_string));
+        .or_else(|| response["threadId"].as_str().map(str::to_string))
+        // Microsoft's send reports no thread, so the conversation the read-back found stands in —
+        // the same id the inbox sync will file the answer under.
+        .or_else(|| sent_refs.thread.clone());
     let job = id();
     let stamp = now();
     sqlx::query("INSERT INTO jobs(id,kind,state,run_at,idempotency_key,payload,created_at,updated_at) VALUES(?,'manual','done',?,?,?,?,?)")
@@ -5727,11 +5741,12 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
         .execute(db)
         .await
         .map_err(err)?;
+    let log_id = id();
     sqlx::query(
-        "INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,to_email,cc,bcc,provider_message_id,thread_id,subject,body,markdown,html,step_position,status,workspace_id,created_at) \
-         VALUES(?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,0,'sent',?,?)",
+        "INSERT INTO send_logs(id,job_id,campaign_id,lead_id,account_id,to_email,cc,bcc,provider_message_id,message_id,thread_id,subject,body,markdown,html,step_position,status,workspace_id,created_at) \
+         VALUES(?,?,NULL,?,?,?,?,?,?,?,?,?,?,?,?,0,'sent',?,?)",
     )
-    .bind(id())
+    .bind(&log_id)
     .bind(&job)
     .bind(&lead_id)
     .bind(&account_id)
@@ -5739,6 +5754,7 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
     .bind(&cc)
     .bind(&bcc)
     .bind(response["id"].as_str())
+    .bind(&sent_refs.message_id)
     .bind(&thread_id)
     .bind(&subject)
     .bind(&text)
@@ -5764,11 +5780,13 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
         .execute(db)
         .await
         .map_err(err)?;
-    // Follow-ups turn a single email into a hidden campaign: one lead, N steps, driven
-    // by the same scheduler. Nothing else about the send changes.
-    let list = input.followups.as_deref().unwrap_or_default();
+    // Follow-ups turn a single email into a hidden campaign: one lead, N steps, driven by the same
+    // scheduler. The email that just went out is step 0 of that campaign, so it is filed against it
+    // — and against the lead, which may only exist now — once the campaign exists. That is what
+    // lets each follow-up find the id it answers and reply inside the conversation rather than
+    // start a second one with the same person.
     if !list.is_empty() {
-        schedule_single_followups(
+        let campaign = schedule_single_followups(
             state.inner(),
             list,
             &account_id,
@@ -5778,6 +5796,13 @@ async fn send_message(state: State<'_, AppState>, input: MessageInput) -> Result
             input.stop_rules.as_ref(),
         )
         .await?;
+        sqlx::query("UPDATE send_logs SET campaign_id=?,lead_id=COALESCE(lead_id,(SELECT lead_id FROM campaign_leads WHERE campaign_id=?)) WHERE id=?")
+            .bind(&campaign)
+            .bind(&campaign)
+            .bind(&log_id)
+            .execute(db)
+            .await
+            .map_err(err)?;
     }
     // A hand-written reply is itself an answer in the thread, so it ends any follow-up
     // still waiting there — the same rule an inbound reply triggers.
@@ -7192,7 +7217,9 @@ async fn conversation(
     .await
     .map_err(err)?;
 
-    let select = "SELECT s.id,s.subject,s.body,s.html,s.created_at,s.status,s.provider_message_id,c.name AS campaign \
+    // The name is only a campaign's when it is one: a single is named after its one recipient, and
+    // offering that as the campaign that wrote the message reads as an address, not a campaign.
+    let select = "SELECT s.id,s.subject,s.body,s.html,s.created_at,s.status,s.provider_message_id,CASE WHEN c.kind='campaign' THEN c.name END AS campaign \
                   FROM send_logs s LEFT JOIN campaigns c ON c.id=s.campaign_id";
     let mut sent = sqlx::query(&format!(
         "{select} WHERE {} ORDER BY s.created_at",
@@ -7450,11 +7477,15 @@ async fn list_scheduled(state: State<'_, AppState>, limit: Option<i64>) -> Resul
 /// which says when the step was made rather than when anything happens, and reading it as a send
 /// time is how a follow-up written days ago comes to look like it is about to go.
 async fn scheduled_sends(db: &SqlitePool, limit: Option<i64>) -> Result<Vec<Value>> {
+    // Only the open workspace's sends: what is waiting is gated by the workspace like everything
+    // else, so another workspace's schedule never surfaces here.
+    let ws = active_workspace(db).await;
     // Each campaign the list touches works its own due times out first, so a step whose lead has
     // never been given one is reported with the time it will go rather than with none.
     let campaigns = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT s.campaign_id FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused')",
+        "SELECT DISTINCT s.campaign_id FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') AND c.workspace_id=?",
     )
+    .bind(&ws)
     .fetch_all(db)
     .await
     .map_err(err)?;
@@ -7464,8 +7495,9 @@ async fn scheduled_sends(db: &SqlitePool, limit: Option<i64>) -> Result<Vec<Valu
     // Last first: a row with nothing due is one nothing is waiting to send, so it belongs under
     // the rows that are actually going.
     let rows = sqlx::query(
-        "SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,c.kind,c.name AS campaign,c.status AS campaign_status,l.email AS lead_email,l.first_name,l.company,cl.next_due_at FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position LEFT JOIN leads l ON l.id=cl.lead_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') ORDER BY (cl.next_due_at IS NULL) ASC, cl.next_due_at ASC, s.position ASC LIMIT ?",
+        "SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,c.kind,c.name AS campaign,c.status AS campaign_status,l.email AS lead_email,l.first_name,l.company,cl.next_due_at FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position LEFT JOIN leads l ON l.id=cl.lead_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') AND c.workspace_id=? ORDER BY (cl.next_due_at IS NULL) ASC, cl.next_due_at ASC, s.position ASC LIMIT ?",
     )
+    .bind(&ws)
     .bind(limit.unwrap_or(200).clamp(1, 500))
     .fetch_all(db)
     .await
@@ -7647,7 +7679,7 @@ async fn list_sent(
         None => (" WHERE s.workspace_id=?", None),
     };
     let sql = format!(
-        "SELECT s.id,s.to_email,s.cc,s.bcc,s.subject,s.body,s.markdown,s.html,s.status,s.created_at,a.email AS account_email,c.name AS campaign,l.email AS lead_email,l.first_name \
+        "SELECT s.id,s.to_email,s.cc,s.bcc,s.subject,s.body,s.markdown,s.html,s.status,s.created_at,a.email AS account_email,CASE WHEN c.kind='campaign' THEN c.name END AS campaign,l.email AS lead_email,l.first_name \
          FROM send_logs s LEFT JOIN accounts a ON a.id=s.account_id LEFT JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN leads l ON l.id=s.lead_id{where_clause} \
          ORDER BY s.created_at DESC LIMIT ?"
     );
