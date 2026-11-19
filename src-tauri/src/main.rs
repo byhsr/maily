@@ -7475,7 +7475,10 @@ async fn list_scheduled(state: State<'_, AppState>, limit: Option<i64>) -> Resul
 /// Every time it reports is a time the scheduler will act on. A step with nothing due is reported
 /// with nothing due: its own `scheduled_at` is the date its rule produced when it was written,
 /// which says when the step was made rather than when anything happens, and reading it as a send
-/// time is how a follow-up written days ago comes to look like it is about to go.
+/// time is how a follow-up written days ago comes to look like it is about to go. A single's later
+/// steps are the projection of that rule rather than a stored time — the wait the current step is
+/// counting down to, plus the waits between — so each one reads as when it will go, not as when it
+/// was written.
 async fn scheduled_sends(db: &SqlitePool, limit: Option<i64>) -> Result<Vec<Value>> {
     // Only the open workspace's sends: what is waiting is gated by the workspace like everything
     // else, so another workspace's schedule never surfaces here.
@@ -7492,33 +7495,69 @@ async fn scheduled_sends(db: &SqlitePool, limit: Option<i64>) -> Result<Vec<Valu
     for campaign in &campaigns {
         resolve_due_times(db, campaign).await?;
     }
-    // Last first: a row with nothing due is one nothing is waiting to send, so it belongs under
-    // the rows that are actually going.
+    // One row per pending step. A campaign's step only belongs to a lead once one is waiting on
+    // it, which is what the position join finds; a single's step belongs to its one lead from the
+    // moment it is written, so its steps are attributed to that lead whether or not the lead has
+    // reached them yet. A later single step then takes its time from the wait the current step is
+    // already counting down to, plus the waits of the steps in between — the projection the
+    // scheduler will act on once each step before it has sent.
     let rows = sqlx::query(
-        "SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,c.kind,c.name AS campaign,c.status AS campaign_status,l.email AS lead_email,l.first_name,l.company,cl.next_due_at FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position LEFT JOIN leads l ON l.id=cl.lead_id WHERE s.status='pending' AND c.status IN ('active','throttled','paused') AND c.workspace_id=? ORDER BY (cl.next_due_at IS NULL) ASC, cl.next_due_at ASC, s.position ASC LIMIT ?",
+        "SELECT s.id,s.campaign_id,s.position,s.delay_days,s.body_md,c.kind,\
+         CASE WHEN c.kind='campaign' THEN c.name END AS campaign,c.status AS campaign_status,\
+         COALESCE(l.email,sl.email) AS lead_email,COALESCE(l.first_name,sl.first_name) AS first_name,\
+         COALESCE(l.company,sl.company) AS company,cl.next_due_at AS step_due,scl.next_due_at AS lead_due,\
+         (SELECT COALESCE(SUM(COALESCE(x.delay_minutes,0)+COALESCE(x.delay_days,0)*1440),0) \
+            FROM sequence_steps x WHERE x.campaign_id=s.campaign_id AND x.enabled=1 \
+              AND x.position>scl.step_position AND x.position<=s.position) AS extra_minutes \
+         FROM sequence_steps s JOIN campaigns c ON c.id=s.campaign_id \
+         LEFT JOIN campaign_leads cl ON cl.campaign_id=s.campaign_id AND cl.step_position=s.position \
+         LEFT JOIN leads l ON l.id=cl.lead_id \
+         LEFT JOIN campaign_leads scl ON scl.campaign_id=s.campaign_id AND c.kind='single' \
+         LEFT JOIN leads sl ON sl.id=scl.lead_id \
+         WHERE s.status='pending' AND c.status IN ('active','throttled','paused') AND c.workspace_id=?",
     )
     .bind(&ws)
-    .bind(limit.unwrap_or(200).clamp(1, 500))
     .fetch_all(db)
     .await
     .map_err(err)?;
-    Ok(rows
+    let mut items: Vec<(Option<String>, i64, Value)> = rows
         .iter()
         .map(|r| {
-            json!({
+            let position: i64 = r.get("position");
+            let due = r.get::<Option<String>, _>("step_due").or_else(|| {
+                let base = r.get::<Option<String>, _>("lead_due")?;
+                let extra: i64 = r.get::<Option<i64>, _>("extra_minutes").unwrap_or(0);
+                Some((moment(&base)? + chrono::Duration::minutes(extra)).to_rfc3339())
+            });
+            let item = json!({
                 "id": r.get::<String,_>("id"),
                 "campaign_id": r.get::<String,_>("campaign_id"),
-                "position": r.get::<i64,_>("position"),
+                "position": position,
                 "kind": r.get::<String,_>("kind"),
                 "campaign": r.get::<Option<String>,_>("campaign"),
                 "campaign_status": r.get::<Option<String>,_>("campaign_status"),
                 "lead_email": r.get::<Option<String>,_>("lead_email"),
                 "lead_name": r.get::<Option<String>,_>("first_name"),
                 "company": r.get::<Option<String>,_>("company"),
-                "due_at": r.get::<Option<String>,_>("next_due_at"),
+                "due_at": due.clone(),
                 "body_md": r.get::<Option<String>,_>("body_md"),
-            })
+            });
+            (due, position, item)
         })
+        .collect();
+    // Last first: a row with nothing due is one nothing is waiting to send, so it belongs under
+    // the rows that are actually going. Sorted here rather than in SQL because a single's later
+    // steps have no stored time to order by until the projection above gives them one.
+    items.sort_by(|a, b| {
+        a.0.is_none()
+            .cmp(&b.0.is_none())
+            .then_with(|| a.0.cmp(&b.0))
+            .then(a.1.cmp(&b.1))
+    });
+    Ok(items
+        .into_iter()
+        .take(limit.unwrap_or(200).clamp(1, 500) as usize)
+        .map(|(_, _, item)| item)
         .collect())
 }
 
@@ -9774,6 +9813,75 @@ mod tests {
                 assert!(steps[0]["due_at"].is_null(), "{thread}");
             }
         }
+    }
+
+    /// A single's follow-ups all belong to its one lead. The step the lead is actually waiting on
+    /// knows its own stored time; the steps after it are projected forward from that time by the
+    /// waits between them, so a second follow-up reads with a recipient and a time rather than as
+    /// an unknown, unscheduled row.
+    #[tokio::test]
+    async fn a_singles_later_steps_are_listed_against_its_lead_and_projected_forward() {
+        let pool = schema().await;
+        let single = id();
+        let lead = id();
+        sqlx::query("INSERT INTO campaigns(id,name,status,kind,approved_at,created_at,updated_at,workspace_id) VALUES(?,'lead@acme.test','active','single',?,?,?,?)")
+            .bind(&single)
+            .bind(now())
+            .bind(now())
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO leads(id,email,status,created_at,updated_at,workspace_id) VALUES(?,?,'active',?,?,?)")
+            .bind(&lead)
+            .bind("lead@acme.test")
+            .bind(now())
+            .bind(now())
+            .bind(DEFAULT_WORKSPACE)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // The lead is on the first follow-up; the second waits behind it, two days after.
+        sqlx::query("INSERT INTO campaign_leads(campaign_id,lead_id,state,step_position) VALUES(?,?,'queued',1)")
+            .bind(&single)
+            .bind(&lead)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (position, days) in [(1i64, 1i64), (2, 2)] {
+            sqlx::query("INSERT INTO sequence_steps(id,campaign_id,position,delay_minutes,delay_days,body_md,status,enabled) VALUES(?,?,?,0,?,'ok','pending',1)")
+                .bind(id())
+                .bind(&single)
+                .bind(position)
+                .bind(days)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let listed = scheduled_sends(&pool, None).await.unwrap();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        let at = |position: i64| {
+            listed
+                .iter()
+                .find(|row| row["position"].as_i64() == Some(position))
+                .unwrap_or_else(|| panic!("no step {position} in {listed:?}"))
+        };
+        for position in [1, 2] {
+            assert_eq!(
+                at(position)["lead_email"].as_str(),
+                Some("lead@acme.test"),
+                "every step of a single belongs to its one lead: {listed:?}"
+            );
+        }
+        let first = moment(at(1)["due_at"].as_str().expect("the waiting step has a time")).unwrap();
+        let second = moment(at(2)["due_at"].as_str().expect("a later step is projected")).unwrap();
+        // Two days of wait sit between them, so the projection lands at least two days on.
+        assert!(
+            second - first >= chrono::Duration::days(2),
+            "a later step is projected past the one before it: {listed:?}"
+        );
     }
 
     /// Opening a reply marks it read, and the count the bell and the rail are drawn from falls
